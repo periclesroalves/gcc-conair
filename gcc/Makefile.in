@@ -1374,6 +1374,7 @@ OBJS = \
 	asan.o \
 	tsan.o \
 	ubsan.o \
+    conair.o \
 	tree-call-cdce.o \
 	tree-cfg.o \
 	tree-cfgcleanup.o \

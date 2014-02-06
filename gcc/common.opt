@@ -2033,6 +2033,10 @@ ftracer
 Common Report Var(flag_tracer)
 Perform superblock formation via tail duplication
 
+fconair
+Common Report Var(flag_conair) Optimization
+Enable ConAir concurrency bug recovery
+
 ; Zero means that floating-point math operations cannot generate a
 ; (user-visible) trap.  This is the case, for example, in nonstop
 ; IEEE 754 arithmetic.

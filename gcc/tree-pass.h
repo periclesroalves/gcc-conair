@@ -355,6 +355,7 @@ extern gimple_opt_pass *make_pass_lower_resx (gcc::context *ctxt);
 extern gimple_opt_pass *make_pass_build_cfg (gcc::context *ctxt);
 extern gimple_opt_pass *make_pass_early_tree_profile (gcc::context *ctxt);
 extern gimple_opt_pass *make_pass_cleanup_eh (gcc::context *ctxt);
+extern gimple_opt_pass *make_pass_conair (gcc::context *ctxt);
 extern gimple_opt_pass *make_pass_sra (gcc::context *ctxt);
 extern gimple_opt_pass *make_pass_sra_early (gcc::context *ctxt);
 extern gimple_opt_pass *make_pass_early_ipa_sra (gcc::context *ctxt);
