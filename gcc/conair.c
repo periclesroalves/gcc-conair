@@ -60,6 +60,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "tree-ssanames.h"
 #include "tree-pass.h"
 
+
 /* Inserts an assertion before the dereference pointed by GSI in block BB to
    verify that ADDR_VAR holds a somewhat valid address.
     
@@ -88,6 +89,7 @@ insert_deref_assert(gimple_stmt_iterator *gsi, tree addr_var)
   edge e_true, e_false;
   basic_block bb_cond, bb_assert, bb_deref;
 
+  // Generate null pointer test.
   bb_cond = gsi_bb (*gsi); 
   cond = gimple_build_cond (EQ_EXPR, addr_var, null_pointer_node, NULL_TREE, NULL_TREE);
   gsi_insert_before (gsi, cond, GSI_SAME_STMT);
@@ -103,18 +105,22 @@ insert_deref_assert(gimple_stmt_iterator *gsi, tree addr_var)
   set_immediate_dominator (CDI_DOMINATORS, bb_assert, bb_cond);
   set_immediate_dominator (CDI_DOMINATORS, bb_deref, bb_cond);
 
+  *gsi = gsi_last_bb (bb_cond);
+
+
+  // TODO:
+  // . Update profile info.
+  // . Insert assertion failure in bb_assert.
+  // . Insert branch prediction hint (see if other versions of assert.h also
+  //    generate __builtin_expect).
+  // . Write regression tests, testing graph form, program execution, and if the
+  //    rest of the block is processed after a given stmt in the block is
+  //    processed.
+
   // DBG
   gimple_stmt_iterator gsi2 = gsi_last_bb (bb_assert);
   gsi_insert_after (&gsi2, gimple_build_nop (), GSI_NEW_STMT);
   // DBG
-
-  // TODO:
-  // . Test if the rest of the block is processed after a given stmt in the
-  //    block is processed.
-  // . Update profile info.
-  // . Insert assertion failure in bb_assert.
-
-  *gsi = gsi_last_bb (bb_cond);
 }
 
 /* Tranforms every other kind of failure point in assertion failures, so that
@@ -132,33 +138,35 @@ simplify_failure_sites ()
 
   FOR_EACH_BB_FN (bb, cfun)
     {
-      // TODO: verify if we need phi iteration for a given kind of FP.
       for (gsi = gsi_start_bb (bb); !gsi_end_p (gsi); gsi_next (&gsi))
     {
       stmt = gsi_stmt (gsi);
 
-      // TODO: Verify builtins that dereference memory.
+      // Verify if this is a pointer dereference (*p = a or a = *p).
+      if (is_gimple_assign (stmt) && gimple_assign_single_p (stmt))
+        {
+          tree lhs, rhs, addr_var;
+          enum tree_code lhs_code, rhs_code;
 
-      if (is_gimple_assign (stmt) && gimple_assign_single_p (stmt)) {
-        tree lhs = gimple_assign_lhs (stmt);
-        tree rhs = gimple_assign_rhs1 (stmt);
-        enum tree_code lhs_code = TREE_CODE (lhs);
-        enum tree_code rhs_code = TREE_CODE (rhs);
-        tree addr_var;
+          lhs = gimple_assign_lhs (stmt);
+          rhs = gimple_assign_rhs1 (stmt);
+          lhs_code = TREE_CODE (lhs);
+          rhs_code = TREE_CODE (rhs);
 
-        if (TREE_CODE_CLASS (lhs_code) == tcc_reference)
+          if (TREE_CODE_CLASS (lhs_code) == tcc_reference)
             addr_var = TREE_OPERAND (lhs, 0);
-        else if (TREE_CODE_CLASS (rhs_code) == tcc_reference)
+          else if (TREE_CODE_CLASS (rhs_code) == tcc_reference)
             addr_var = TREE_OPERAND (rhs, 0);
-        else
+          else
             continue;
 
-        if ((TREE_CODE (addr_var) == SSA_NAME)
-          && !pointer_set_contains (simplified_stmts, stmt)) {
-            insert_deref_assert(&gsi, addr_var);
-            pointer_set_insert (simplified_stmts, stmt);
+          if ((TREE_CODE (addr_var) == SSA_NAME)
+              && !pointer_set_contains (simplified_stmts, stmt))
+            {
+              insert_deref_assert(&gsi, addr_var);
+              pointer_set_insert (simplified_stmts, stmt);
+            }
         }
-      }
     }
     }
 
@@ -170,33 +178,37 @@ simplify_failure_sites ()
 static unsigned int
 do_conair (void)
 {
-  simplify_failure_sites ();
-
-
-
-
-
   basic_block bb;
   gimple_stmt_iterator gsi;
   gimple stmt;
 
+  simplify_failure_sites ();
+
+  // Indentify failure sites.
   FOR_EACH_BB_FN (bb, cfun)
     {
-      // TODO: verify if we need phi iteration for a given kind of FP.
       for (gsi = gsi_start_bb (bb); !gsi_end_p (gsi); gsi_next (&gsi))
     {
+      tree fndecl;
+      char *posix_assert_fail = "__assert_fail";
+      char *bsd_assert_fail = "__assert_rtn";
       stmt = gsi_stmt (gsi);
-      
-      if (is_gimple_call (stmt)) {
-          tree fndecl = gimple_call_fndecl (stmt);
 
-          if ((fndecl != NULL_TREE) && (strncmp (IDENTIFIER_POINTER (DECL_NAME (fndecl)), "__assert_rtn", 12) == 0))
+      if (is_gimple_call (stmt)
+          && (fndecl = gimple_call_fndecl (stmt)) != NULL_TREE)
+        {
+          bool is_assert_fail = (strncmp (IDENTIFIER_POINTER (DECL_NAME (fndecl)), posix_assert_fail, 13) == 0)
+              || (strncmp (IDENTIFIER_POINTER (DECL_NAME (fndecl)), bsd_assert_fail, 12) == 0);
+
+          if (is_assert_fail)
+              // TODO: store this failure site.
               printf ("found assert failure!\n");
-      }
-      
+        }
     }
     }
 
+  // TODO: identify idempotent regions.
+  // TODO: perform rollback instrumentation.
 
   return 0;
 }
