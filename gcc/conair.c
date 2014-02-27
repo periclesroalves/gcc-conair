@@ -62,7 +62,7 @@ along with GCC; see the file COPYING3.  If not see
 
 
 /* Inserts an assertion before the dereference pointed by GSI in block BB to
-   verify that ADDR_VAR holds a somewhat valid address.
+   verify that ADDR_VAR holds a somewhat valid address. Example:
     
                                  |
         |                 ______\|/_______
@@ -73,13 +73,13 @@ along with GCC; see the file COPYING3.  If not see
     |________|               |     T      ___\|/___
         |                  F |           | abort() |
        \|/                   |           |_________|
-                             |  ______________|
-                         _\|/_\|/_
-                        |  a = *p |
-                        |   ...   |
-                        |_________|
-                             |
-                            \|/
+                             |    ____________|
+                           _\|/_\|/_
+                          |  a = *p |
+                          |   ...   |
+                          |_________|
+                               |
+                              \|/
 */
 
 static void
