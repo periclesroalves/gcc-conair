@@ -85,13 +85,31 @@ along with GCC; see the file COPYING3.  If not see
 static void
 insert_deref_assert(gimple_stmt_iterator *gsi, tree addr_var)
 {
-  gimple cond;
+  gimple null_ptr_cmp, cast, call_expect, cond;
   edge e_true, e_false;
   basic_block bb_cond, bb_assert, bb_deref;
 
+  bb_cond = gsi_bb (*gsi);
+
   // Generate null pointer test.
-  bb_cond = gsi_bb (*gsi); 
-  cond = gimple_build_cond (EQ_EXPR, addr_var, null_pointer_node, NULL_TREE, NULL_TREE);
+  tree cmp_val = make_ssa_name (boolean_type_node, NULL);
+  tree cmp_expr = build2 (EQ_EXPR, boolean_type_node, addr_var, null_pointer_node);
+  null_ptr_cmp = gimple_build_assign (cmp_val, cmp_expr);
+  gsi_insert_before (gsi, null_ptr_cmp, GSI_SAME_STMT);
+
+  // Insert brach prediction hint using "__builtin_expect".
+  tree cast_val = make_ssa_name (long_integer_type_node, NULL);
+  cast = gimple_build_assign_with_ops (NOP_EXPR, cast_val, cmp_val, NULL_TREE);
+  gsi_insert_before (gsi, cast, GSI_SAME_STMT);
+  call_expect = gimple_build_call (builtin_decl_explicit (BUILT_IN_EXPECT), 2, cast_val,
+      build_int_cst (long_integer_type_node, 0));
+  tree expect_ret = make_ssa_name (long_integer_type_node, NULL);
+  gimple_call_set_lhs (call_expect, expect_ret);
+  gsi_insert_before (gsi, call_expect, GSI_SAME_STMT);
+
+  // Generate actual conditional jump to assertion failure.
+  cond = gimple_build_cond (NE_EXPR, expect_ret,
+      build_int_cst (long_integer_type_node, 0), NULL_TREE, NULL_TREE);
   gsi_insert_before (gsi, cond, GSI_SAME_STMT);
   e_true = split_block (bb_cond, cond);
   bb_deref = e_true->dest;
@@ -102,17 +120,12 @@ insert_deref_assert(gimple_stmt_iterator *gsi, tree addr_var)
   e_true->flags &= ~EDGE_FALLTHRU;
   e_true->flags |= EDGE_TRUE_VALUE;
 
-  set_immediate_dominator (CDI_DOMINATORS, bb_assert, bb_cond);
-  set_immediate_dominator (CDI_DOMINATORS, bb_deref, bb_cond);
-
   *gsi = gsi_last_bb (bb_cond);
 
 
   // TODO:
   // . Update profile info.
   // . Insert assertion failure in bb_assert.
-  // . Insert branch prediction hint (see if other versions of assert.h also
-  //    generate __builtin_expect).
   // . Write regression tests, testing graph form, program execution, and if the
   //    rest of the block is processed after a given stmt in the block is
   //    processed.
