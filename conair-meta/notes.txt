@@ -11,6 +11,9 @@
    . Since this coudn't be verified, newly inserted assertion failure block will
    have the original dereference block as a successor, as the user may redefine
    __assert_rtn or __assert_fail not to exit.
+  TODO: currently we implement assertion failures as calls to __builtin_trap.
+  However, the original assert() does nothing when NDEBUG is defined, and so
+  should our implementaation.
 
 - I assume that every pointer dereference is represented as the rhs or lhs of a
   single rhs assignment. In other stages of the CFG this may not be true. Other
@@ -23,4 +26,6 @@
     instrumentation, hence not creating a buch of new SSA names for each failure
     site.
 
-- TODO: improve graph-check to verify the existence of assertion failure calls.
+- TODO: improve graph-check to verify the existence of assertion failure calls
+  (maybe create one version of pointer testing for output testing and another
+  for segfault avoidance testing).

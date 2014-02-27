@@ -69,11 +69,11 @@ along with GCC; see the file COPYING3.  If not see
      __\|/___            |      ...       |
     |   ...  |           | if (p == NULL) |
     | a = *p |           |________________|
-    |   ...  |   --->        |      |___________
-    |________|               |     T     ______\|/______
-        |                  F |          | __assert_fail |
-       \|/                   |          |_______________|
-                             |  ________________|
+    |   ...  |   --->        |      |_________
+    |________|               |     T      ___\|/___
+        |                  F |           | abort() |
+       \|/                   |           |_________|
+                             |  ______________|
                          _\|/_\|/_
                         |  a = *p |
                         |   ...   |
@@ -85,7 +85,8 @@ along with GCC; see the file COPYING3.  If not see
 static void
 insert_deref_assert(gimple_stmt_iterator *gsi, tree addr_var)
 {
-  gimple null_ptr_cmp, cast, call_expect, cond;
+  gimple null_ptr_cmp, cast, call_expect, cond, call_fail;
+  gimple_stmt_iterator gsi_assert;
   edge e_true, e_false;
   basic_block bb_cond, bb_assert, bb_deref;
 
@@ -122,18 +123,16 @@ insert_deref_assert(gimple_stmt_iterator *gsi, tree addr_var)
 
   *gsi = gsi_last_bb (bb_cond);
 
+  // Insert the actual assertion failure exit (implemented as a trap).
+  gsi_assert = gsi_start_bb (bb_assert);
+  call_fail = gimple_build_call (builtin_decl_explicit (BUILT_IN_TRAP), 0);
+  gsi_insert_before (&gsi_assert, call_fail, GSI_SAME_STMT);
+
 
   // TODO:
   // . Update profile info.
-  // . Insert assertion failure in bb_assert.
-  // . Write regression tests, testing graph form, program execution, and if the
-  //    rest of the block is processed after a given stmt in the block is
-  //    processed.
-
-  // DBG
-  gimple_stmt_iterator gsi2 = gsi_last_bb (bb_assert);
-  gsi_insert_after (&gsi2, gimple_build_nop (), GSI_NEW_STMT);
-  // DBG
+  // . Dump location info before assertion failure, to mimic actual assert.h
+  //    behavior.
 }
 
 /* Tranforms every other kind of failure point in assertion failures, so that
@@ -205,17 +204,19 @@ do_conair (void)
       tree fndecl;
       char *posix_assert_fail = "__assert_fail";
       char *bsd_assert_fail = "__assert_rtn";
+      char *self_assert_fail = "__builtin_trap";
       stmt = gsi_stmt (gsi);
 
       if (is_gimple_call (stmt)
           && (fndecl = gimple_call_fndecl (stmt)) != NULL_TREE)
         {
           bool is_assert_fail = (strncmp (IDENTIFIER_POINTER (DECL_NAME (fndecl)), posix_assert_fail, 13) == 0)
-              || (strncmp (IDENTIFIER_POINTER (DECL_NAME (fndecl)), bsd_assert_fail, 12) == 0);
+              || (strncmp (IDENTIFIER_POINTER (DECL_NAME (fndecl)), bsd_assert_fail, 12) == 0)
+              || (strncmp (IDENTIFIER_POINTER (DECL_NAME (fndecl)), self_assert_fail, 14) == 0);
 
           if (is_assert_fail)
               // TODO: store this failure site.
-              printf ("found assert failure!\n");
+              printf ("DBG: found failure point.\n");
         }
     }
     }
