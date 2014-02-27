@@ -1,0 +1,24 @@
+#!/usr/bin/python
+
+# Script for verifying the consistency of a GCC SSA graph instrumented using
+# ConAir.
+
+import sys
+
+graph = open(sys.argv[1])
+graph = graph.readlines()
+
+foundError = False
+
+for i in range(0, len(graph)):
+  # Verify assertions before pointer dereferences.
+  if (graph[i].startswith("  *") and graph[i].find(" = ") != -1) or graph[i].find(" = *") != -1:
+    if (i-12) < 0 or graph[i-3].find("GIMPLE_NOP") == -1:
+      foundError = True
+    if graph[i-9].find("if") == -1 or graph[i-10].find("__builtin_expect") == -1:
+      foundError = True
+    if graph[i-12].find(" == 0B") == -1:
+      foundError = True
+  if foundError:
+    print "  ERROR: graph is not consistent."
+    exit()

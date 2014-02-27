@@ -1,0 +1,26 @@
+- BSD: __assert_rtn
+  POSIX: __assert_fail
+
+- TODO: Document pass in trunk/gcc/doc/invoke.texi
+- TODO: Remember to verify tods for after pass (e.g., clean_ssa, which requires
+  marking new names to be done).
+
+- I coudn't find a way to verify if a function comes from a library, so I wasn't
+  able to verify if the user may have overwritten functions like __assert_rtn
+  and pthreads_lock.
+   . Since this coudn't be verified, newly inserted assertion failure block will
+   have the original dereference block as a successor, as the user may redefine
+   __assert_rtn or __assert_fail not to exit.
+
+- I assume that every pointer dereference is represented as the rhs or lhs of a
+  single rhs assignment. In other stages of the CFG this may not be true. Other
+  than that, the dereferenced address must be hold by an SSA name, so that we
+  can safely test it before the actual dereference (no side effect garanteed).
+  TODO: In addition, we must consider builtin functions that may dereference an
+    argument: maybe handle them by hand.
+  TODO: prune dereference instrumentation tmps. Since a failure site cannot be
+    inside another, we can reuse the same SSA names in every dereference
+    instrumentation, hence not creating a buch of new SSA names for each failure
+    site.
+
+- TODO: improve graph-check to verify the existence of assertion failure calls.

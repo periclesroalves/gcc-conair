@@ -1,0 +1,59 @@
+#!/bin/bash
+
+# Simple regression test suite for ConAir implementation in GCC.
+
+i=1
+while [[ i -le $# ]]; do
+if [[ ${@:$i:1} == "-h" || ${@:$i:1} == "--help" ]]; then
+echo "Usage: run --gccbin=[path]"
+exit
+elif [[ ${@:$i:1} =~ --gccbin=* ]]; then
+gccBin=${@:$i:1}
+gccBin=${gccBin#--gccbin=}
+fi
+
+(( i++ ))
+done
+
+if [[ -z $gccBin ]]; then
+echo "ERROR: missing path to GCC binary. Use --gccbin=<path>"
+exit
+fi
+
+
+testFile=tests/pointer-deref.c
+rm base opt *.conair base_out.txt opt_out.txt>& /dev/null
+
+echo "Testing: " ${testFile#tests/}
+
+echo "  Compiling using clean version of GCC"
+$gccBin $testFile -o base
+
+echo "  Compiling using GCC with ConAir"
+$gccBin -fdump-tree-conair -fconair $testFile -o opt
+
+echo "  Verifying graph consistency"
+  ./check-graph *.conair
+
+echo "  Comparing execution output"
+{ ./base >> base_out.txt 2>&1; } >> base_out.txt 2>&1
+{ ./opt >> opt_out.txt 2>&1; } >> opt_out.txt 2>&1
+if grep -qi "segmentation fault" "opt_out.txt"; then
+  echo "  ERROR: segmentation fault"
+else
+  if cmp -s base_out.txt opt_out.txt; then
+      printf ""
+  else
+    echo "  ERROR: wrong execution output."
+    echo "    expected:"
+    echo "----------------------------------------------"
+    cat base_out.txt
+    echo "----------------------------------------------"
+    echo "    got:"
+    echo "----------------------------------------------"
+    cat opt_out.txt
+    echo "----------------------------------------------"
+  fi
+fi
+
+rm base opt *.conair base_out.txt opt_out.txt>& /dev/null
