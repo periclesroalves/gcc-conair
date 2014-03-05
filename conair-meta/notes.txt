@@ -1,6 +1,3 @@
-- BSD: __assert_rtn
-  POSIX: __assert_fail
-
 - TODO: Document pass in trunk/gcc/doc/invoke.texi
 - TODO: Remember to verify tods for after pass (e.g., clean_ssa, which requires
   marking new names to be done).
@@ -21,10 +18,6 @@
   can safely test it before the actual dereference (no side effect garanteed).
   TODO: In addition, we must consider builtin functions that may dereference an
     argument: maybe handle them by hand.
-  TODO: prune dereference instrumentation tmps. Since a failure site cannot be
-    inside another, we can reuse the same SSA names in every dereference
-    instrumentation, hence not creating a buch of new SSA names for each failure
-    site.
 
 - TODO: improve graph-check to verify the existence of assertion failure calls
   (maybe create one version of pointer testing for output testing and another

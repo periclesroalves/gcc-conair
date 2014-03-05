@@ -40,6 +40,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "tree.h"
 #include "print-tree.h"
 #include "flags.h"
+#include "bitmap.h"
 #include "basic-block.h"
 #include "function.h"
 #include "gimple-pretty-print.h"
@@ -60,6 +61,46 @@ along with GCC; see the file COPYING3.  If not see
 #include "tree-ssanames.h"
 #include "tree-pass.h"
 
+
+/* Identify reexecution points as the beginning of the largest possible
+   idempotent code regions before the statement pointed by GSI, in a backwards
+   DFS fashion.  */
+static void
+identify_reexecution_points (gimple_stmt_iterator gsi_failure)
+{
+  basic_block failure_bb;
+  edge e;
+  vec<basic_block> stack = vNULL;
+  bitmap visited;
+
+  visited = BITMAP_ALLOC (NULL);
+  failure_bb = gsi_bb (gsi_failure);
+
+  // A failure site must consist of a single call to an assertion failure
+  // function.
+  gcc_assert (gsi_failure == gsi_start_bb (failure_bb)
+      && gsi_failure == gsi_last_bb (failure_bb));
+  gcc_assert (single_pred_p (failure_bb));
+
+  e = single_pred_edge (failure_bb);
+  stack.safe_push (e->src);
+  bitmap_set_bit (visited, e->src->index);
+
+  do
+    {
+      basic_block bb = stack.pop ();
+      gimple_stmt_iterator gsi;
+
+      for (gsi = gsi_last_bb (bb); !gsi_end_p (gsi); gsi_prev (&gsi))
+    {
+
+    }
+    }
+  while (stack.length ());
+
+  BITMAP_FREE (visited);
+  stack.release ();
+}
 
 /* Inserts an assertion before the dereference pointed by GSI in block BB to
    verify that ADDR_VAR holds a somewhat valid address. Example:
@@ -83,7 +124,7 @@ along with GCC; see the file COPYING3.  If not see
 */
 
 static void
-insert_deref_assert(gimple_stmt_iterator *gsi, tree addr_var)
+insert_deref_assert (gimple_stmt_iterator *gsi, tree addr_var)
 {
   gimple null_ptr_cmp, cast, call_expect, cond, call_fail;
   gimple_stmt_iterator gsi_assert;
@@ -202,9 +243,9 @@ do_conair (void)
       for (gsi = gsi_start_bb (bb); !gsi_end_p (gsi); gsi_next (&gsi))
     {
       tree fndecl;
-      char *posix_assert_fail = "__assert_fail";
-      char *bsd_assert_fail = "__assert_rtn";
-      char *self_assert_fail = "__builtin_trap";
+      const char *posix_assert_fail = "__assert_fail";
+      const char *bsd_assert_fail = "__assert_rtn";
+      const char *self_assert_fail = "__builtin_trap";
       stmt = gsi_stmt (gsi);
 
       if (is_gimple_call (stmt)
