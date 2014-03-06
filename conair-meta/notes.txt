@@ -1,3 +1,7 @@
+---------
+- General
+---------
+
 - TODO: Document pass in trunk/gcc/doc/invoke.texi
 - TODO: Remember to verify tods for after pass (e.g., clean_ssa, which requires
   marking new names to be done).
@@ -16,9 +20,32 @@
   single rhs assignment. In other stages of the CFG this may not be true. Other
   than that, the dereferenced address must be hold by an SSA name, so that we
   can safely test it before the actual dereference (no side effect garanteed).
+  NOTE: arrays declared locally with fixed size are handled with special
+    indexing read and write instructions. Currently this instructions are not
+    being considered for pointer dereference instrumentation. We must also
+    handle this in a different way when looking for idempotent regions.
   TODO: In addition, we must consider builtin functions that may dereference an
     argument: maybe handle them by hand.
 
 - TODO: improve graph-check to verify the existence of assertion failure calls
   (maybe create one version of pointer testing for output testing and another
   for segfault avoidance testing).
+
+
+--------------------
+- Idempotent regions
+--------------------
+
+GCC has two types of SSA operands: real and virtual. Real operands are scalar
+local variables with location known at all times and virtual operands are
+references to globals, aliased variables, arrays, etc. To what I understand,
+when looking for idempotent regions, we must consider the following:
+  - Write to virtual operands (virtual definitions/stores) are
+    idempotent-destroying instructions.
+  - Assignments to real operands are not idempotent-destroying, since SSA
+    guarantees no write after read and real operands will be kept in registers
+    and we restore the register image when performing rollback. (!see marc's
+    paper on how this may not be true).
+
+!!! Consider definitions created by phi nodes.
+!!! Consider SSA loop counter.

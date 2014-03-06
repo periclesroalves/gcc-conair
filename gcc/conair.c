@@ -62,9 +62,28 @@ along with GCC; see the file COPYING3.  If not see
 #include "tree-pass.h"
 
 
+/* Verifies if a given STMT has side effects.  */
+static bool
+is_idempotent_destroying (gimple stmt)
+{
+  // Check calls.
+  if (gimple_has_side_effects (stmt))
+    return true;
+
+  // Check for virtual definitions (wirte to heap, globals, aliased vars, etc).
+  if (is_gimple_assign (stmt) && gimple_store_p (stmt))
+    return true;
+
+  // TODO: handle real definitions if needed.
+
+  return false;
+}
+
 /* Identify reexecution points as the beginning of the largest possible
    idempotent code regions before the statement pointed by GSI, in a backwards
-   DFS fashion.  */
+   DFS fashion. Reexecution points are always located right after the locations
+   reported by this function, in order to avoid handling cases in which the
+   last instruction in a block is idempotent-destroying.  */
 static void
 identify_reexecution_points (gimple_stmt_iterator gsi_failure)
 {
@@ -76,10 +95,9 @@ identify_reexecution_points (gimple_stmt_iterator gsi_failure)
   visited = BITMAP_ALLOC (NULL);
   failure_bb = gsi_bb (gsi_failure);
 
-  // A failure site must consist of a single call to an assertion failure
-  // function.
-  gcc_assert (gsi_failure == gsi_start_bb (failure_bb)
-      && gsi_failure == gsi_last_bb (failure_bb));
+  // The first statement in a failure site must be the call to the ssertion
+  // failure function.
+  gcc_assert (gsi_stmt (gsi_failure) == gsi_stmt (gsi_start_bb (failure_bb)));
   gcc_assert (single_pred_p (failure_bb));
 
   e = single_pred_edge (failure_bb);
@@ -88,12 +106,44 @@ identify_reexecution_points (gimple_stmt_iterator gsi_failure)
 
   do
     {
-      basic_block bb = stack.pop ();
+      basic_block bb;
+      gimple idemp_begin;
       gimple_stmt_iterator gsi;
+      bool continue_search;
+
+      bb = stack.pop ();
+      continue_search = true;
 
       for (gsi = gsi_last_bb (bb); !gsi_end_p (gsi); gsi_prev (&gsi))
     {
+      if (is_idempotent_destroying (gsi_stmt (gsi)))
+        {
+          continue_search = false;
+          idemp_begin = gsi_stmt (gsi);
 
+          // TODO: report this reexecution point.
+        }
+    }
+
+      if (continue_search)
+    {
+        // Stop at entry if no other reexecution point was found for this function.
+        if (bb->index == 0)
+          {
+            idemp_begin = gsi_stmt (gsi_start_bb (bb));
+
+            // TODO: report this reexecution point.
+          }
+        else
+          {
+            edge_iterator ei;
+  
+            FOR_EACH_EDGE (e, ei, bb->preds)
+              {
+            if (bitmap_set_bit (visited, e->src->index))
+              stack.safe_push (e->src);
+              }  
+          }
     }
     }
   while (stack.length ());
