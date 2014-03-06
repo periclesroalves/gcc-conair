@@ -80,34 +80,29 @@ is_idempotent_destroying (gimple stmt)
 }
 
 /* Identify the starting points of the largest possible idempotent code regions
-   before the statement pointed by GSI_FAILURE, in a backwards DFS fashion.
+   before the statement pointed by GSI_IDEMP_END, in a backwards DFS fashion.
    Starting points are always located right after the locations reported by this
    function, in order to avoid handling cases in which the last instruction in a
    block is idempotent-destroying.  */
 static void
-identify_idemp_regions (gimple_stmt_iterator gsi_failure, vec<gimple> *results)
+identify_idemp_regions (gimple_stmt_iterator gsi_idemp_end, vec<gimple> *results)
 {
-  basic_block failure_bb;
+  basic_block bb_idemp_end;
   edge e;
   vec<basic_block> stack = vNULL;
   bitmap visited;
+  bool start_at_idemp_end;
 
   visited = BITMAP_ALLOC (NULL);
-  failure_bb = gsi_bb (gsi_failure);
-
-  // The first statement in a failure site must be the call to the asertion
-  // failure function.
-  gcc_assert (gsi_stmt (gsi_failure) == gsi_stmt (gsi_start_bb (failure_bb)));
-  gcc_assert (single_pred_p (failure_bb));
-
-  e = single_pred_edge (failure_bb);
-  stack.safe_push (e->src);
-  bitmap_set_bit (visited, e->src->index);
+  bb_idemp_end = gsi_bb (gsi_idemp_end);
+  stack.safe_push (bb_idemp_end);
+  bitmap_set_bit (visited, bb_idemp_end->index);
+  start_at_idemp_end = true;
 
   do
     {
       basic_block bb;
-      gimple idemp_begin;
+      gimple idemp_begin_point;
       gimple_stmt_iterator gsi;
       bool continue_search;
 
@@ -116,32 +111,41 @@ identify_idemp_regions (gimple_stmt_iterator gsi_failure, vec<gimple> *results)
 
       for (gsi = gsi_last_bb (bb); !gsi_end_p (gsi); gsi_prev (&gsi))
     {
-      if (is_idempotent_destroying (gsi_stmt (gsi)))
+      // In the first block, begin search right before the end of the idempotent
+      // regions.
+      if (start_at_idemp_end)
+        {
+          gsi = gsi_idemp_end;
+          start_at_idemp_end = false;
+          continue;
+        }
+
+      if (!gsi_end_p (gsi) && is_idempotent_destroying (gsi_stmt (gsi)))
         {
           continue_search = false;
-          idemp_begin = gsi_stmt (gsi);
-          results->safe_push (idemp_begin);
+          idemp_begin_point = gsi_stmt (gsi);
+          results->safe_push (idemp_begin_point);
         }
     }
 
       if (continue_search)
     {
-        // Stop at entry if no other reexecution point was found for this function.
-        if (bb->index == 0)
-          {
-            idemp_begin = gsi_stmt (gsi_start_bb (bb));
-            results->safe_push (idemp_begin);
-          }
-        else
-          {
-            edge_iterator ei;
+      // Stop at function entry if no other idempotent start point was found.
+      if (bb->index == 0)
+        {
+          idemp_begin_point = gsi_stmt (gsi_start_bb (bb));
+          results->safe_push (idemp_begin_point);
+        }
+      else
+        {
+          edge_iterator ei;
   
-            FOR_EACH_EDGE (e, ei, bb->preds)
-              {
-            if (bitmap_set_bit (visited, e->src->index))
-              stack.safe_push (e->src);
-              }  
-          }
+          FOR_EACH_EDGE (e, ei, bb->preds)
+            {
+          if (bitmap_set_bit (visited, e->src->index))
+            stack.safe_push (e->src);
+            }  
+        }
     }
     }
   while (stack.length ());

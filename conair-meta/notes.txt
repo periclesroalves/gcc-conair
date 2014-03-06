@@ -48,4 +48,3 @@ when looking for idempotent regions, we must consider the following:
     paper on how this may not be true).
 
 !!! Consider definitions created by phi nodes.
-!!! Consider SSA loop counter.
