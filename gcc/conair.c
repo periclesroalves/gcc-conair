@@ -79,13 +79,13 @@ is_idempotent_destroying (gimple stmt)
   return false;
 }
 
-/* Identify reexecution points as the beginning of the largest possible
-   idempotent code regions before the statement pointed by GSI, in a backwards
-   DFS fashion. Reexecution points are always located right after the locations
-   reported by this function, in order to avoid handling cases in which the
-   last instruction in a block is idempotent-destroying.  */
+/* Identify the starting points of the largest possible idempotent code regions
+   before the statement pointed by GSI_FAILURE, in a backwards DFS fashion.
+   Starting points are always located right after the locations reported by this
+   function, in order to avoid handling cases in which the last instruction in a
+   block is idempotent-destroying.  */
 static void
-identify_reexecution_points (gimple_stmt_iterator gsi_failure)
+identify_idemp_regions (gimple_stmt_iterator gsi_failure, vec<gimple> *results)
 {
   basic_block failure_bb;
   edge e;
@@ -95,7 +95,7 @@ identify_reexecution_points (gimple_stmt_iterator gsi_failure)
   visited = BITMAP_ALLOC (NULL);
   failure_bb = gsi_bb (gsi_failure);
 
-  // The first statement in a failure site must be the call to the ssertion
+  // The first statement in a failure site must be the call to the asertion
   // failure function.
   gcc_assert (gsi_stmt (gsi_failure) == gsi_stmt (gsi_start_bb (failure_bb)));
   gcc_assert (single_pred_p (failure_bb));
@@ -120,8 +120,7 @@ identify_reexecution_points (gimple_stmt_iterator gsi_failure)
         {
           continue_search = false;
           idemp_begin = gsi_stmt (gsi);
-
-          // TODO: report this reexecution point.
+          results->safe_push (idemp_begin);
         }
     }
 
@@ -131,8 +130,7 @@ identify_reexecution_points (gimple_stmt_iterator gsi_failure)
         if (bb->index == 0)
           {
             idemp_begin = gsi_stmt (gsi_start_bb (bb));
-
-            // TODO: report this reexecution point.
+            results->safe_push (idemp_begin);
           }
         else
           {
@@ -150,6 +148,19 @@ identify_reexecution_points (gimple_stmt_iterator gsi_failure)
 
   BITMAP_FREE (visited);
   stack.release ();
+}
+
+/* Instrument a failure site with thread rollback code.  */
+static void
+instrument_failure_site (gimple_stmt_iterator gsi_failure)
+{
+  vec<gimple> idemp_begin_points = vNULL;
+
+  identify_idemp_regions (gsi_failure, &idemp_begin_points);
+
+  // TODO: perform rollback instrumentation.
+
+  idemp_begin_points.release ();
 }
 
 /* Inserts an assertion before the dereference pointed by GSI in block BB to
@@ -287,7 +298,7 @@ do_conair (void)
 
   simplify_failure_sites ();
 
-  // Indentify failure sites.
+  // Indentify and instrument failure sites.
   FOR_EACH_BB_FN (bb, cfun)
     {
       for (gsi = gsi_start_bb (bb); !gsi_end_p (gsi); gsi_next (&gsi))
@@ -306,14 +317,10 @@ do_conair (void)
               || (strncmp (IDENTIFIER_POINTER (DECL_NAME (fndecl)), self_assert_fail, 14) == 0);
 
           if (is_assert_fail)
-              // TODO: store this failure site.
-              printf ("DBG: found failure point.\n");
+            instrument_failure_site (gsi);
         }
     }
     }
-
-  // TODO: identify idempotent regions.
-  // TODO: perform rollback instrumentation.
 
   return 0;
 }
