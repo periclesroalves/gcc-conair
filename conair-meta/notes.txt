@@ -3,7 +3,7 @@
 ---------
 
 - TODO: Document pass in trunk/gcc/doc/invoke.texi
-- TODO: Remember to verify tods for after pass (e.g., clean_ssa, which requires
+- TODO: Remember to verify todos for after pass (e.g., clean_ssa, which requires
   marking new names to be done).
 
 - I coudn't find a way to verify if a function comes from a library, so I wasn't
@@ -41,10 +41,32 @@ local variables with location known at all times and virtual operands are
 references to globals, aliased variables, arrays, etc. To what I understand,
 when looking for idempotent regions, we must consider the following:
   - Write to virtual operands (virtual definitions/stores) are
-    idempotent-destroying instructions.
-  - Assignments to real operands are not idempotent-destroying, since SSA
-    guarantees no write after read and real operands will be kept in registers
-    and we restore the register image when performing rollback. (!see marc's
-    paper on how this may not be true).
+    idempotent-destroying instructions, mainly because they may change data
+    exposed to another threads.
+  - Assignments to real operands:
+     . SSA guarantees no static write after read, however copy insertion for
+     phi elimination will eventually insert problematic variable reassignments
+     in loops.
+     . Variables are not guaranteed to be in registers all times, therefore the
+     compiler must not reuse the same stack slot for two variables (probably
+     disable the stack coloring pass) (-fno-ira-share-spill-slots).
+     . Register restoring solves the problem of potential assignment of two
+     different variables to the same register.
+     . Dynamic rewrites ...
+       . Have to find an algorithm to detect potential clobber dependences in
+       loops:
+        . Phis that imply in read before reassignment always occour in the head of
+        a loop.
+        . A copy instruction will be inserted at the end of all blocks that
+        define the operands of the phi instruction that defines the variable.
+        . ? Therefore every assignment of a operand of the phi can be considered
+        a reassignment of the variable that the phi instruction defines.
+        . !!! Shan gave the idea of, for every loop, in case there's no
+        idempotency-destroying operation inside the loop, when create a memory
+        checkpoint for conflicting variables right before the loop starts, so we
+        can always recover the whole loop. In case there is a
+        idempotency-destroying operation in the loop body, we simply insert a
+        reexecution point in the beginning of the loop header.
 
-!!! Consider definitions created by phi nodes.
+!!! if a idemp begin point is a phi instruction, then the intrumentation must be
+inserted at the beginning of the block (after phis, before statements).

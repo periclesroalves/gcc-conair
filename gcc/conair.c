@@ -99,6 +99,9 @@ identify_idemp_regions (gimple_stmt_iterator gsi_idemp_end, vec<gimple> *results
   bitmap_set_bit (visited, bb_idemp_end->index);
   start_at_idemp_end = true;
 
+  // For simplicity, idempotent regions cannot end at a phi node.
+  gcc_assert (gimple_code (gsi_stmt (gsi_idemp_end)) != GIMPLE_PHI);
+
   do
     {
       basic_block bb;
@@ -120,11 +123,27 @@ identify_idemp_regions (gimple_stmt_iterator gsi_idemp_end, vec<gimple> *results
           continue;
         }
 
-      if (!gsi_end_p (gsi) && is_idempotent_destroying (gsi_stmt (gsi)))
+      if (is_idempotent_destroying (gsi_stmt (gsi)))
         {
           continue_search = false;
           idemp_begin_point = gsi_stmt (gsi);
           results->safe_push (idemp_begin_point);
+          break;
+        }
+    }
+
+      // Phi nodes can also destroy idempotency, as they may represent stores.
+      if (continue_search)
+    {
+      for (gsi = gsi_last_phis (bb); !gsi_end_p (gsi); gsi_prev (&gsi))
+        {
+          if (is_idempotent_destroying (gsi_stmt (gsi)))
+            {
+              continue_search = false;
+              idemp_begin_point = gsi_stmt (gsi);
+              results->safe_push (idemp_begin_point);
+              break;
+            }
         }
     }
 

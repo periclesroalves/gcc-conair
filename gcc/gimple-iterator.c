@@ -880,3 +880,12 @@ gsi_start_phis (basic_block bb)
   gimple_seq *pseq = phi_nodes_ptr (bb);
   return gsi_start_1 (pseq);
 }
+
+/* Returns iterator at the end of the list of phi nodes of BB.  */
+
+gimple_stmt_iterator
+gsi_last_phis (basic_block bb)
+{
+  gimple_seq *pseq = phi_nodes_ptr (bb);
+  return gsi_last_1 (pseq);
+}
