@@ -1,4 +1,4 @@
----------
+
 - General
 ---------
 
@@ -44,29 +44,45 @@ when looking for idempotent regions, we must consider the following:
     idempotent-destroying instructions, mainly because they may change data
     exposed to another threads.
   - Assignments to real operands:
-     . SSA guarantees no static write after read, however copy insertion for
-     phi elimination will eventually insert problematic variable reassignments
-     in loops.
-     . Variables are not guaranteed to be in registers all times, therefore the
-     compiler must not reuse the same stack slot for two variables (probably
-     disable the stack coloring pass) (-fno-ira-share-spill-slots).
-     . Register restoring solves the problem of potential assignment of two
-     different variables to the same register.
-     . Dynamic rewrites ...
-       . Have to find an algorithm to detect potential clobber dependences in
-       loops:
-        . Phis that imply in read before reassignment always occour in the head of
-        a loop.
-        . A copy instruction will be inserted at the end of all blocks that
-        define the operands of the phi instruction that defines the variable.
-        . ? Therefore every assignment of a operand of the phi can be considered
-        a reassignment of the variable that the phi instruction defines.
-        . !!! Shan gave the idea of, for every loop, in case there's no
-        idempotency-destroying operation inside the loop, when create a memory
-        checkpoint for conflicting variables right before the loop starts, so we
-        can always recover the whole loop. In case there is a
-        idempotency-destroying operation in the loop body, we simply insert a
-        reexecution point in the beginning of the loop header.
+    . SSA guarantees no static write after read, however copy insertion for
+    phi elimination will eventually insert problematic variable reassignments
+    in loops.
+    . Variables are not guaranteed to be in registers all times, therefore the
+    compiler must not reuse the same stack slot for two variables (probably
+    disable the stack coloring pass) (-fno-ira-share-spill-slots).
+    TODO: try to disable stack coloring only for variables in idempotent
+    regions.
+    . Register restoring solves the problem of potential assignment of two
+    different variables to the same register.
+    . Dynamic rewrites - possible algorithm:
+      . When visiting a phi in a loop head, if at least one of its operands are
+      assigned within the loop, insert a stack checkpoint for every operand
+      defined outside the loop.
+      !!! This is useless when there are no paths in the loop that do not cross
+      a cut.
+      !!! Verify if the checkpoint block is not removed by future passes.
+      . Every time a cut is inserted in a loop, insert the loop id in cutLoops.
+      . When visiting * = V inside a loop:
+        . if V is defined by a phi in the loop head AND at least one of the phi
+        operands are assigned inside the loop:
+          . if the loop was already cut, insert a cut after * = V and don't
+          push its predecessors.
+          . otherwise, add * = V to potentiallyHarmfulReads.
+      . at the end of the backwards BFS, iterate over potentiallyHarmfulReads
+      inserting cuts after reads whose loops where cut (are in cutLoops).
+      !!! remember that loops may have outer loops and bb->father_loop
+      references only the innermost one.
+
 
 !!! if a idemp begin point is a phi instruction, then the intrumentation must be
 inserted at the beginning of the block (after phis, before statements).
+!!! Idempotency analysis is run for each failure site. Take care so we do not
+insert a reexection point in the same place more than once. Maybe we could
+maintain a set of already analysed blocks. We would still have the problem of
+blocks that were only analysed from somewhere in the middle. Verify how this
+behaves when inserting cuts for dynamic variables in loops. Another option would
+be simply to analyse everything again, and let the caller handle repeated
+identified reexecution points (problably mantaining a set of reexection points
+and instrumenting them in a different pass (after analysing and instrumenting
+all failure sites)).
+!!! it looks like simple induction variables are not in SSA form. Verify that.

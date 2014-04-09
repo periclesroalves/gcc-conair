@@ -21,9 +21,12 @@ along with GCC; see the file COPYING3.  If not see
 
    References:
 
-     ConAir: Featherweight Concurrency Bug Recovery Via
-     Single-Threaded Idempotent Execution, Wei Zhang, Marc de Kruijf,
-     Ang Li, Shan Lu, Karthikeyan Sankaralingam, ASPLOS, 2013.
+     [1] Wei Zhang, Marc de Kruijf, Ang Li, Shan Lu, Karthikeyan Sankaralingam,
+     "ConAir: Featherweight Concurrency Bug Recovery Via Single-Threaded
+     Idempotent Execution", ASPLOS, 2013.
+
+     [2] Marc de Kruijf, Karthikeyan Sankaralingam, and Somesh Jha, "Static
+     Analysis and Compiler Design for Idempotent Processing", PLDI, 2012.
 
    The algorithm is divided into three main steps:
 
@@ -60,11 +63,16 @@ along with GCC; see the file COPYING3.  If not see
 #include "stringpool.h"
 #include "tree-ssanames.h"
 #include "tree-pass.h"
+#include "cfgloop.h"
+
+
+static bitmap headers_with_checkpoints;
 
 
 /* Verifies if a given STMT has side effects.  */
+
 static bool
-is_idempotent_destroying (gimple stmt)
+stmt_idempotent_destroying_p (gimple stmt)
 {
   // Check calls.
   if (gimple_has_side_effects (stmt))
@@ -74,16 +82,140 @@ is_idempotent_destroying (gimple stmt)
   if (is_gimple_assign (stmt) && gimple_store_p (stmt))
     return true;
 
-  // TODO: handle real definitions if needed.
-
   return false;
 }
+
+
+/* SSA properties garantee no static redefinitions. However, for phi functions
+   that dominate the definition of at least one of its operands, copy insertion
+   for SSA elimination may insert dynamic rewrites. Such rewrites may end up
+   creating read-write sequences not preceded by another write instruction,
+   which are idempotent-destroying. Such scenario only happens for phi
+   functions in loop headers and affect idempotent regions that get passed the
+   loop entry point. A stack checkpoint in the loop pre-header guarantees that
+   such regions will always contain an actual write to every variable defined
+   by a phi in the lop header. This will eventually lead to larger idempotent
+   regions. Example:
+                                                   |
+          |         Reassignment after          __\|/____
+       __\|/___     non-idempotent operation   | i0 = 0  |
+      | i0 =0  |   '-----------,------------'  |  ...    |
+      |  ...   |               |               | sys()   |
+      | sys()  |               '-------------->| i3 = i0 |
+      |________|                               |_________|
+          |         ________                       |         ________
+      ___\|/_______\|/___   |                  ___\|/_______\|/___   |
+     | i1 = phi (i0, i2) |  |       --->      | i1 = phi (i3, i2) |  |
+     |___________________|  |                 |___________________|  |
+            |               |                        |               |
+           ...              |                       ...              |
+            |               |                        |               |
+      _____\|/_____         |                  _____\|/_____         |
+     | i2 = i1 + 1 |        |                 | i2 = i1 + 1 |        |
+     |_____________|        |                 |_____________|        |
+         |     |____________|                     |     |____________|
+        \|/                                      \|/
+*/
+
+static void
+insert_loop_header_checkpoint (basic_block header)
+{
+  gimple stmt;
+  basic_block checkpoint_bb;
+  edge e, entry_e;
+  edge_iterator ei;
+  imm_use_iterator iter;
+  gimple_stmt_iterator gsi;
+  struct pointer_set_t *seen_vars;
+  vec<tree> vars_to_reassign;
+
+  if (bitmap_bit_p (headers_with_checkpoints, header->index))
+    return;
+
+  gcc_assert (header == header->loop_father->header);
+  gcc_assert (header->loop_father->latch != NULL);
+
+  seen_vars = pointer_set_create ();
+  vars_to_reassign = vNULL;
+
+  // The preheader will be used as checkpoint for the whole loop.
+  if (EDGE_COUNT (header->preds) > 2)
+    create_preheader (header->loop_father, 0);
+
+  FOR_EACH_EDGE (e, ei, header->preds)
+    {
+  if (e->src != header->loop_father->latch)
+    checkpoint_bb = e->src;
+    }
+
+  entry_e = single_succ_edge (checkpoint_bb);
+
+  // Variables defined after all idempotent-destroying operations happen in the
+  // pre-header do not need reassignment (do not bother looking at the phis).
+  for (gsi = gsi_last_bb (checkpoint_bb); !gsi_end_p (gsi); gsi_prev (&gsi))
+    {
+      stmt = gsi_stmt (gsi);
+
+      if (stmt_idempotent_destroying_p (stmt))
+    break;
+
+      if (is_gimple_assign (stmt))
+    {
+      tree lhs = gimple_assign_lhs (stmt);
+
+      if (TREE_CODE (lhs) == SSA_NAME)
+        pointer_set_insert (seen_vars, lhs);
+    }
+    }
+
+  // Extract all phi operands that need reassignment, i.e, any operand defined
+  // outside the loop before an idempotent-destroying operation.
+  for (gsi = gsi_start_phis (header); !gsi_end_p (gsi); gsi_next (&gsi))
+    {
+      stmt = gsi_stmt (gsi);
+      tree arg = PHI_ARG_DEF_FROM_EDGE (stmt, entry_e);
+
+      if ((TREE_CODE (arg) == SSA_NAME)
+          && !pointer_set_insert (seen_vars, arg))
+        vars_to_reassign.safe_push (arg);
+    }
+
+  // Creates a reassignment for every conflicting variable in the checkpoint
+  // block.
+  while (vars_to_reassign.length() > 0)
+    {
+      gsi = gsi_last_bb (checkpoint_bb);
+      tree old_var = vars_to_reassign.pop ();
+      tree new_var = make_ssa_name (TREE_TYPE (old_var), NULL);
+      gimple reassgn = gimple_build_assign (new_var, old_var);
+      gsi_insert_after (&gsi, reassgn, GSI_SAME_STMT);
+
+      FOR_EACH_IMM_USE_STMT (stmt, iter, old_var)
+    {
+      if (gimple_bb (stmt)->index == header->index)
+        {
+          use_operand_p use_p;
+
+          FOR_EACH_IMM_USE_ON_STMT (use_p, iter)
+            SET_USE (use_p, new_var);
+        }
+    }
+    }
+
+  bitmap_set_bit (headers_with_checkpoints, header->index);
+
+  vars_to_reassign.release ();
+  pointer_set_destroy (seen_vars);
+}
+
 
 /* Identify the starting points of the largest possible idempotent code regions
    before the statement pointed by GSI_IDEMP_END, in a backwards DFS fashion.
    Starting points are always located right after the locations reported by this
    function, in order to avoid handling cases in which the last instruction in a
-   block is idempotent-destroying.  */
+   block is idempotent-destroying. Note that this function will eventually chage
+   the CFG, in order to generate larger idempotent regions.  */
+
 static void
 identify_idemp_regions (gimple_stmt_iterator gsi_idemp_end, vec<gimple> *results)
 {
@@ -123,7 +255,7 @@ identify_idemp_regions (gimple_stmt_iterator gsi_idemp_end, vec<gimple> *results
           continue;
         }
 
-      if (is_idempotent_destroying (gsi_stmt (gsi)))
+      if (stmt_idempotent_destroying_p (gsi_stmt (gsi)))
         {
           continue_search = false;
           idemp_begin_point = gsi_stmt (gsi);
@@ -137,7 +269,7 @@ identify_idemp_regions (gimple_stmt_iterator gsi_idemp_end, vec<gimple> *results
     {
       for (gsi = gsi_last_phis (bb); !gsi_end_p (gsi); gsi_prev (&gsi))
         {
-          if (is_idempotent_destroying (gsi_stmt (gsi)))
+          if (stmt_idempotent_destroying_p (gsi_stmt (gsi)))
             {
               continue_search = false;
               idemp_begin_point = gsi_stmt (gsi);
@@ -149,6 +281,10 @@ identify_idemp_regions (gimple_stmt_iterator gsi_idemp_end, vec<gimple> *results
 
       if (continue_search)
     {
+      // Needed to restore dynamically reassigned variables.
+      if (bb == bb->loop_father->header)
+        insert_loop_header_checkpoint (bb);
+
       // Stop at function entry if no other idempotent start point was found.
       if (bb->index == 0)
         {
@@ -173,7 +309,9 @@ identify_idemp_regions (gimple_stmt_iterator gsi_idemp_end, vec<gimple> *results
   stack.release ();
 }
 
+
 /* Instrument a failure site with thread rollback code.  */
+
 static void
 instrument_failure_site (gimple_stmt_iterator gsi_failure)
 {
@@ -185,6 +323,7 @@ instrument_failure_site (gimple_stmt_iterator gsi_failure)
 
   idemp_begin_points.release ();
 }
+
 
 /* Inserts an assertion before the dereference pointed by GSI in block BB to
    verify that ADDR_VAR holds a somewhat valid address. Example:
@@ -260,6 +399,7 @@ insert_deref_assert (gimple_stmt_iterator *gsi, tree addr_var)
   //    behavior.
 }
 
+
 /* Tranforms every other kind of failure point in assertion failures, so that
  * they can be handled in the same way later. */
 
@@ -310,6 +450,7 @@ simplify_failure_sites ()
   pointer_set_destroy (simplified_stmts);
 }
 
+
 /* Main entry point for concurrency bug recovery instrumentation.  */
 
 static unsigned int
@@ -318,6 +459,15 @@ do_conair (void)
   basic_block bb;
   gimple_stmt_iterator gsi;
   gimple stmt;
+
+  // This pass requires loop info to work.
+  gcc_assert (current_loops != NULL);
+
+  headers_with_checkpoints = BITMAP_ALLOC (NULL);
+
+  // To keep idempotency at low level, no two variables can share the same stack
+  // slot.
+  flag_ira_share_spill_slots = FALSE;
 
   simplify_failure_sites ();
 
@@ -330,6 +480,7 @@ do_conair (void)
       const char *posix_assert_fail = "__assert_fail";
       const char *bsd_assert_fail = "__assert_rtn";
       const char *self_assert_fail = "__builtin_trap";
+
       stmt = gsi_stmt (gsi);
 
       if (is_gimple_call (stmt)
@@ -344,6 +495,8 @@ do_conair (void)
         }
     }
     }
+
+  BITMAP_FREE (headers_with_checkpoints);
 
   return 0;
 }
