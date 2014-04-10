@@ -69,6 +69,7 @@ along with GCC; see the file COPYING3.  If not see
 static struct pointer_set_t *reexec_points;
 static bitmap headers_with_checkpoints;
 static bitmap cut_loops;
+static tree j_buffer;
 
 
 /* Verifies if a given STMT has side effects.  */
@@ -376,7 +377,10 @@ extract_reexec_points (gimple_stmt_iterator gsi_idemp_end)
 static void
 instrument_failure_site (gimple_stmt_iterator gsi_failure)
 {
-  // TODO: perform rollback instrumentation.
+  tree buf_addr = build_fold_addr_expr (j_buffer);
+  gimple longjmp_call = gimple_build_call (builtin_decl_implicit
+    (BUILT_IN_LONGJMP), 1, buf_addr);
+  gsi_insert_before (&gsi_failure, longjmp_call, GSI_SAME_STMT);
 }
 
 
@@ -503,6 +507,21 @@ simplify_failure_sites ()
 }
 
 
+/* Declares a buffer local to the current function, for use with setjmp and
+   longjmp calls  */
+
+static void
+initialize_jmp_buffer ()
+{
+  // Setjmp and longjmp need a 5 word buffer.
+  tree size = size_int (5 * BITS_PER_WORD / POINTER_SIZE - 1);
+  tree index = build_index_type (size);
+  tree type = build_array_type (ptr_type_node, index);
+
+  j_buffer = build_decl (DECL_SOURCE_LOCATION (current_function_decl),
+    VAR_DECL, get_identifier ("__conair_j_buf"), type);
+}
+
 /* Main entry point for concurrency bug recovery instrumentation.  */
 
 static unsigned int
@@ -518,6 +537,7 @@ do_conair (void)
   reexec_points = pointer_set_create ();
   cut_loops = BITMAP_ALLOC (NULL);
   headers_with_checkpoints = BITMAP_ALLOC (NULL);
+  initialize_jmp_buffer ();
 
   // To keep idempotency at low level, no two variables can share the same stack
   // slot.

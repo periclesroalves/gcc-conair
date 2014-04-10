@@ -75,7 +75,8 @@ when looking for idempotent regions, we must consider the following:
       !!! remember that loops may have outer loops and bb->father_loop
       references only the innermost one.
 
-
+TODO: insert reexecution counters in failure sites (according to the paper, this
+is a global counter for the whole function).
 !!! if a idemp begin point is a phi instruction, then the intrumentation must be
 inserted at the beginning of the block (after phis, before statements).
 !!! Idempotency analysis is run for each failure site. Take care so we do not
