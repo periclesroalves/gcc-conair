@@ -126,7 +126,7 @@ insert_loop_header_checkpoint (basic_block header)
   basic_block checkpoint_bb;
   edge e, entry_e;
   edge_iterator ei;
-  imm_use_iterator iter;
+  imm_use_iterator ui;
   gimple_stmt_iterator gsi;
   struct pointer_set_t *seen_vars;
   vec<tree> vars_to_reassign;
@@ -192,13 +192,13 @@ insert_loop_header_checkpoint (basic_block header)
       gimple reassgn = gimple_build_assign (new_var, old_var);
       gsi_insert_after (&gsi, reassgn, GSI_SAME_STMT);
 
-      FOR_EACH_IMM_USE_STMT (stmt, iter, old_var)
+      FOR_EACH_IMM_USE_STMT (stmt, ui, old_var)
     {
       if ((gimple_bb (stmt))->index == header->index)
         {
           use_operand_p use_p;
 
-          FOR_EACH_IMM_USE_ON_STMT (use_p, iter)
+          FOR_EACH_IMM_USE_ON_STMT (use_p, ui)
             SET_USE (use_p, new_var);
         }
     }
@@ -211,10 +211,13 @@ insert_loop_header_checkpoint (basic_block header)
 }
 
 
+/* Register a new reexecution point and update the set of loops containing at
+   least one reexecution point in their body.  */
+
 static void
-register_reexec_point (gimple stmt)
+register_reexec_point (gimple stmt, bool update_loop_cuts)
 {
-  if (!pointer_set_insert (reexec_points, stmt))
+  if (!pointer_set_insert (reexec_points, stmt) && update_loop_cuts)
     {
       struct loop *loop = (gimple_bb (stmt))->loop_father;
       bitmap_set_bit (cut_loops, loop->num);
@@ -225,6 +228,46 @@ register_reexec_point (gimple stmt)
     }
     }
 }
+
+
+/* For every loop containing at least one reexecution point in its body, we
+   insert reexecution points after uses of every variable defined by a phi
+   function in the loop's header. We do that to avoid idempotent regions of
+   code from becoming non-idempotent after copy insertion for phi elimination.
+ */
+
+static void
+inspect_cut_loops ()
+{
+  struct loop *loop;
+  unsigned int i;
+  bitmap_iterator bi;
+  gimple_stmt_iterator gsi;
+  imm_use_iterator ui;
+  gimple stmt;
+
+  EXECUTE_IF_SET_IN_BITMAP (cut_loops, 0, i, bi)
+    {
+      loop = (*current_loops->larray)[i];
+
+      for (gsi = gsi_start_phis (loop->header); !gsi_end_p (gsi); gsi_next (&gsi))
+    {
+      gimple phi = gsi_stmt (gsi);
+      tree var = gimple_phi_result (phi);
+
+      FOR_EACH_IMM_USE_STMT (stmt, ui, var)
+        {
+          struct loop * common_loop = find_common_loop(loop,
+            (gimple_bb (stmt))->loop_father);
+
+          // Test if the use is inside the current loop.
+          if (common_loop->num == loop->num)
+            register_reexec_point (stmt, false);
+        }
+    }
+    }
+}
+
 
 /* Identify reexecution points as the starting points of the largest possible
    idempotent code regions before the statement pointed by GSI_IDEMP_END, in a
@@ -275,7 +318,7 @@ extract_reexec_points (gimple_stmt_iterator gsi_idemp_end)
       if (stmt_idempotent_destroying_p (gsi_stmt (gsi)))
         {
           continue_search = false;
-          register_reexec_point (gsi_stmt (gsi));
+          register_reexec_point (gsi_stmt (gsi), true);
           break;
         }
     }
@@ -288,7 +331,7 @@ extract_reexec_points (gimple_stmt_iterator gsi_idemp_end)
           if (stmt_idempotent_destroying_p (gsi_stmt (gsi)))
             {
               continue_search = false;
-              register_reexec_point (gsi_stmt (gsi));
+              register_reexec_point (gsi_stmt (gsi), true);
               break;
             }
         }
@@ -304,7 +347,7 @@ extract_reexec_points (gimple_stmt_iterator gsi_idemp_end)
       if (bb->index == 0)
         {
           gimple idemp_begin_point = gsi_stmt (gsi_start_bb (bb));
-          register_reexec_point (idemp_begin_point);
+          register_reexec_point (idemp_begin_point, true);
         }
       else
         {
@@ -319,6 +362,8 @@ extract_reexec_points (gimple_stmt_iterator gsi_idemp_end)
     }
     }
   while (stack.length ());
+
+  inspect_cut_loops ();
 
   BITMAP_FREE (visited);
   stack.release ();
@@ -377,14 +422,14 @@ insert_deref_assert (gimple_stmt_iterator *gsi, tree addr_var)
   cast = gimple_build_assign_with_ops (NOP_EXPR, cast_val, cmp_val, NULL_TREE);
   gsi_insert_before (gsi, cast, GSI_SAME_STMT);
   call_expect = gimple_build_call (builtin_decl_explicit (BUILT_IN_EXPECT), 2, cast_val,
-      build_int_cst (long_integer_type_node, 0));
+    build_int_cst (long_integer_type_node, 0));
   tree expect_ret = make_ssa_name (long_integer_type_node, NULL);
   gimple_call_set_lhs (call_expect, expect_ret);
   gsi_insert_before (gsi, call_expect, GSI_SAME_STMT);
 
   // Generate actual conditional jump to assertion failure.
   cond = gimple_build_cond (NE_EXPR, expect_ret,
-      build_int_cst (long_integer_type_node, 0), NULL_TREE, NULL_TREE);
+    build_int_cst (long_integer_type_node, 0), NULL_TREE, NULL_TREE);
   gsi_insert_before (gsi, cond, GSI_SAME_STMT);
   e_true = split_block (bb_cond, cond);
   bb_deref = e_true->dest;

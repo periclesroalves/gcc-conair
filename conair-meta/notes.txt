@@ -63,14 +63,15 @@ when looking for idempotent regions, we must consider the following:
       a cut.
       !!! Verify if the checkpoint block is not removed by future passes.
       . Every time a cut is inserted in a loop, insert the loop id in cutLoops.
-      . When visiting * = V inside a loop:
-        . if V is defined by a phi in the loop head AND at least one of the phi
-        operands are assigned inside the loop:
-          . if the loop was already cut, insert a cut after * = V and don't
-          push its predecessors.
-          . otherwise, add * = V to potentiallyHarmfulReads.
-      . at the end of the backwards BFS, iterate over potentiallyHarmfulReads
-      inserting cuts after reads whose loops where cut (are in cutLoops).
+      . At the end of the analysis, insert cuts after reads that appear inside
+      the loop for every variable defined by phis in the header of every loop
+      that was cut. (this can generate a big number of useless reexecution
+      points. See if we can reduce this number by verifying if loops were cut
+      when handling reads inside loops)
+      !!! Verify if this is actually working.
+      !!! Opt: we don't actually need cuts after all reads, but just that every
+      read do not reach a failure site without passing through a reexecution
+      point.
       !!! remember that loops may have outer loops and bb->father_loop
       references only the innermost one.
 
@@ -86,4 +87,10 @@ be simply to analyse everything again, and let the caller handle repeated
 identified reexecution points (problably mantaining a set of reexection points
 and instrumenting them in a different pass (after analysing and instrumenting
 all failure sites)).
-!!! it looks like simple induction variables are not in SSA form. Verify that.
+!!! it looks like simple induction variables are not in SSA form (probably being
+considered stores). Verify that (maybe it's just my example, which captures the
+induction var address).
+!!! Maybe at the end we can run a static analysi to remove redundant reexecution
+points.
+!!! Try to avoid revisiting the same blocks when analysing different failure
+points.
