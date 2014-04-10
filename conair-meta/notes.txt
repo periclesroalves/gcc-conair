@@ -58,6 +58,7 @@ when looking for idempotent regions, we must consider the following:
       . When visiting a phi in a loop head, if at least one of its operands are
       assigned within the loop, insert a stack checkpoint for every operand
       defined outside the loop.
+      !!! Take care so the block is not generated when the loop has no phis.
       !!! This is useless when there are no paths in the loop that do not cross
       a cut.
       !!! Verify if the checkpoint block is not removed by future passes.

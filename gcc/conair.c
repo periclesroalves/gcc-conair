@@ -66,7 +66,9 @@ along with GCC; see the file COPYING3.  If not see
 #include "cfgloop.h"
 
 
+static struct pointer_set_t *reexec_points;
 static bitmap headers_with_checkpoints;
+static bitmap cut_loops;
 
 
 /* Verifies if a given STMT has side effects.  */
@@ -182,7 +184,7 @@ insert_loop_header_checkpoint (basic_block header)
 
   // Creates a reassignment for every conflicting variable in the checkpoint
   // block.
-  while (vars_to_reassign.length() > 0)
+  while (vars_to_reassign.length () > 0)
     {
       gsi = gsi_last_bb (checkpoint_bb);
       tree old_var = vars_to_reassign.pop ();
@@ -192,7 +194,7 @@ insert_loop_header_checkpoint (basic_block header)
 
       FOR_EACH_IMM_USE_STMT (stmt, iter, old_var)
     {
-      if (gimple_bb (stmt)->index == header->index)
+      if ((gimple_bb (stmt))->index == header->index)
         {
           use_operand_p use_p;
 
@@ -209,15 +211,31 @@ insert_loop_header_checkpoint (basic_block header)
 }
 
 
-/* Identify the starting points of the largest possible idempotent code regions
-   before the statement pointed by GSI_IDEMP_END, in a backwards DFS fashion.
-   Starting points are always located right after the locations reported by this
-   function, in order to avoid handling cases in which the last instruction in a
-   block is idempotent-destroying. Note that this function will eventually chage
-   the CFG, in order to generate larger idempotent regions.  */
+static void
+register_reexec_point (gimple stmt)
+{
+  if (!pointer_set_insert (reexec_points, stmt))
+    {
+      struct loop *loop = (gimple_bb (stmt))->loop_father;
+      bitmap_set_bit (cut_loops, loop->num);
+
+      while ((loop = loop_outer (loop)) != NULL)
+    {
+      bitmap_set_bit (cut_loops, loop->num); 
+    }
+    }
+}
+
+/* Identify reexecution points as the starting points of the largest possible
+   idempotent code regions before the statement pointed by GSI_IDEMP_END, in a
+   backwards DFS fashion. Reexecution points are always located right after the
+   locations reported by this function, in order to avoid handling cases in
+   which the last instruction in a block is idempotent-destroying. Note that
+   this function will eventually chage the CFG, in order to generate larger
+   idempotent regions.  */
 
 static void
-identify_idemp_regions (gimple_stmt_iterator gsi_idemp_end, vec<gimple> *results)
+extract_reexec_points (gimple_stmt_iterator gsi_idemp_end)
 {
   basic_block bb_idemp_end;
   edge e;
@@ -237,7 +255,6 @@ identify_idemp_regions (gimple_stmt_iterator gsi_idemp_end, vec<gimple> *results
   do
     {
       basic_block bb;
-      gimple idemp_begin_point;
       gimple_stmt_iterator gsi;
       bool continue_search;
 
@@ -258,8 +275,7 @@ identify_idemp_regions (gimple_stmt_iterator gsi_idemp_end, vec<gimple> *results
       if (stmt_idempotent_destroying_p (gsi_stmt (gsi)))
         {
           continue_search = false;
-          idemp_begin_point = gsi_stmt (gsi);
-          results->safe_push (idemp_begin_point);
+          register_reexec_point (gsi_stmt (gsi));
           break;
         }
     }
@@ -272,8 +288,7 @@ identify_idemp_regions (gimple_stmt_iterator gsi_idemp_end, vec<gimple> *results
           if (stmt_idempotent_destroying_p (gsi_stmt (gsi)))
             {
               continue_search = false;
-              idemp_begin_point = gsi_stmt (gsi);
-              results->safe_push (idemp_begin_point);
+              register_reexec_point (gsi_stmt (gsi));
               break;
             }
         }
@@ -288,8 +303,8 @@ identify_idemp_regions (gimple_stmt_iterator gsi_idemp_end, vec<gimple> *results
       // Stop at function entry if no other idempotent start point was found.
       if (bb->index == 0)
         {
-          idemp_begin_point = gsi_stmt (gsi_start_bb (bb));
-          results->safe_push (idemp_begin_point);
+          gimple idemp_begin_point = gsi_stmt (gsi_start_bb (bb));
+          register_reexec_point (idemp_begin_point);
         }
       else
         {
@@ -310,18 +325,13 @@ identify_idemp_regions (gimple_stmt_iterator gsi_idemp_end, vec<gimple> *results
 }
 
 
-/* Instrument a failure site with thread rollback code.  */
+/* Instrument a failure site with thread rollback code, i.e., reexecution
+   counter and longjmp call.  */
 
 static void
 instrument_failure_site (gimple_stmt_iterator gsi_failure)
 {
-  vec<gimple> idemp_begin_points = vNULL;
-
-  identify_idemp_regions (gsi_failure, &idemp_begin_points);
-
   // TODO: perform rollback instrumentation.
-
-  idemp_begin_points.release ();
 }
 
 
@@ -401,7 +411,7 @@ insert_deref_assert (gimple_stmt_iterator *gsi, tree addr_var)
 
 
 /* Tranforms every other kind of failure point in assertion failures, so that
- * they can be handled in the same way later. */
+   they can be handled in the same way later. */
 
 static void
 simplify_failure_sites ()
@@ -438,11 +448,8 @@ simplify_failure_sites ()
             continue;
 
           if ((TREE_CODE (addr_var) == SSA_NAME)
-              && !pointer_set_contains (simplified_stmts, stmt))
-            {
-              insert_deref_assert(&gsi, addr_var);
-              pointer_set_insert (simplified_stmts, stmt);
-            }
+              && !pointer_set_insert (simplified_stmts, stmt))
+            insert_deref_assert (&gsi, addr_var);
         }
     }
     }
@@ -463,6 +470,8 @@ do_conair (void)
   // This pass requires loop info to work.
   gcc_assert (current_loops != NULL);
 
+  reexec_points = pointer_set_create ();
+  cut_loops = BITMAP_ALLOC (NULL);
   headers_with_checkpoints = BITMAP_ALLOC (NULL);
 
   // To keep idempotency at low level, no two variables can share the same stack
@@ -471,7 +480,7 @@ do_conair (void)
 
   simplify_failure_sites ();
 
-  // Indentify and instrument failure sites.
+  // Indentify reexecution points and instrument failure sites.
   FOR_EACH_BB_FN (bb, cfun)
     {
       for (gsi = gsi_start_bb (bb); !gsi_end_p (gsi); gsi_next (&gsi))
@@ -490,13 +499,18 @@ do_conair (void)
               || (strncmp (IDENTIFIER_POINTER (DECL_NAME (fndecl)), bsd_assert_fail, 12) == 0)
               || (strncmp (IDENTIFIER_POINTER (DECL_NAME (fndecl)), self_assert_fail, 14) == 0);
 
-          if (is_assert_fail)
-            instrument_failure_site (gsi);
+          if (is_assert_fail) 
+        {
+          extract_reexec_points (gsi);
+          instrument_failure_site (gsi);
+        }
         }
     }
     }
 
   BITMAP_FREE (headers_with_checkpoints);
+  BITMAP_FREE (cut_loops);
+  pointer_set_destroy (reexec_points);
 
   return 0;
 }
