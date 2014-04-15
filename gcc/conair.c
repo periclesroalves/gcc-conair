@@ -377,9 +377,8 @@ extract_reexec_points (gimple_stmt_iterator gsi_idemp_end)
 static void
 instrument_failure_site (gimple_stmt_iterator gsi_failure)
 {
-  tree buf_addr = build_fold_addr_expr (j_buffer);
-  gimple longjmp_call = gimple_build_call (builtin_decl_implicit
-    (BUILT_IN_LONGJMP), 1, buf_addr);
+  gimple longjmp_call = gimple_build_call (builtin_decl_explicit
+    (BUILT_IN_LONGJMP), 1, j_buffer);
   gsi_insert_before (&gsi_failure, longjmp_call, GSI_SAME_STMT);
 }
 
@@ -520,7 +519,10 @@ initialize_jmp_buffer ()
 
   j_buffer = build_decl (DECL_SOURCE_LOCATION (current_function_decl),
     VAR_DECL, get_identifier ("__conair_j_buf"), type);
+  TREE_PUBLIC (j_buffer) = 1;
+  DECL_COMMON (j_buffer) = 1;
 }
+
 
 /* Main entry point for concurrency bug recovery instrumentation.  */
 
