@@ -54,6 +54,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "gimple-expr.h"
 #include "is-a.h"
 #include "gimple.h"
+#include "cgraph.h"
 #include "gimplify.h"
 #include "gimple-iterator.h"
 #include "gimple-ssa.h"
@@ -131,6 +132,10 @@ insert_loop_header_checkpoint (basic_block header)
   gimple_stmt_iterator gsi;
   struct pointer_set_t *seen_vars;
   vec<tree> vars_to_reassign;
+
+  // The function entry block is a fake loop, so nothing needs to be restored.
+  if (header->index == 0)
+    return;
 
   if (bitmap_bit_p (headers_with_checkpoints, header->index))
     return;
@@ -522,7 +527,10 @@ initialize_jmp_buffer ()
   j_buffer = build_decl (DECL_SOURCE_LOCATION (current_function_decl),
     VAR_DECL, get_identifier ("__conair_j_buf"), type);
   TREE_STATIC (j_buffer) = 1;
-  DECL_COMMON (j_buffer) = 1;
+  TREE_ADDRESSABLE (j_buffer) = 1;
+  DECL_ARTIFICIAL (j_buffer) = 1;
+  DECL_INITIAL (j_buffer) = NULL;
+  varpool_finalize_decl (j_buffer);
 }
 
 

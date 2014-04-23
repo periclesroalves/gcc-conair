@@ -26,6 +26,10 @@
     handle this in a different way when looking for idempotent regions.
   TODO: In addition, we must consider builtin functions that may dereference an
     argument: maybe handle them by hand.
+  TODO: right now we only test for NULL pointers. In the future, we could try to
+  see if the pointer is within the program segment, so we can catch bugs like
+  dereferencing unitialized pointers, which are not null, but hold an illegal
+  adress.
 
 - TODO: improve graph-check to verify the existence of assertion failure calls
   (maybe create one version of pointer testing for output testing and another
@@ -95,3 +99,14 @@ induction var address).
 points.
 !!! Try to avoid revisiting the same blocks when analysing different failure
 points.
+!!! Right now the jump buffer is local to a function. If we ever implement
+inter-procedural analysis, we need to change it for a global buffer.
+
+
+--------------
+- Set/longjmps
+--------------
+
+- See all passes that verify BUILT_IN_SETJMP/LONGJMP before conair, so we can
+  replicate all checks and behavior performed. Be careful to inspect in depth,
+  like any consequence it can have.
