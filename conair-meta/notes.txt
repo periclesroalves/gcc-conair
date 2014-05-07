@@ -2,6 +2,9 @@
 - General
 ---------
 
+- TODO: update loop and dominanace info for blocks created in
+  insert_deref_assert (even with split block and split_edge) (see tree-complex.c
+  1152 for example).
 - TODO: Document pass in trunk/gcc/doc/invoke.texi
 - TODO: Remember to verify todos for after pass (e.g., clean_ssa, which requires
   marking new names to be done).
@@ -107,6 +110,12 @@ inter-procedural analysis, we need to change it for a global buffer.
 - Set/longjmps
 --------------
 
-- See all passes that verify BUILT_IN_SETJMP/LONGJMP before conair, so we can
-  replicate all checks and behavior performed. Be careful to inspect in depth,
-  like any consequence it can have.
+- TODO: Mimic all properties setted in when setjmp/longjmp calls are found. Passes
+  that run before ConAir can execute normally, even if they depend on the
+  existence of setjmp/longjmps. All we have to guarantee is that future passes
+  will be aware of the setjmps we inserted. Be carefull to verify that every pass
+  that sets program properties based on the existence of setjmp/longjmps are
+  replicated in our code.
+BUG: longjmp call is replacing __trap_ call.
+- Verify if builtin setjmps can be used interprocedurally without any problem,
+  because the labels seem to be local to the function.

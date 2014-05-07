@@ -286,16 +286,16 @@ inspect_cut_loops ()
 static void
 extract_reexec_points (gimple_stmt_iterator gsi_idemp_end)
 {
-  basic_block bb_idemp_end;
+  basic_block idemp_end_bb;
   edge e;
   vec<basic_block> stack = vNULL;
   bitmap visited;
   bool start_at_idemp_end;
 
   visited = BITMAP_ALLOC (NULL);
-  bb_idemp_end = gsi_bb (gsi_idemp_end);
-  stack.safe_push (bb_idemp_end);
-  bitmap_set_bit (visited, bb_idemp_end->index);
+  idemp_end_bb = gsi_bb (gsi_idemp_end);
+  stack.safe_push (idemp_end_bb);
+  bitmap_set_bit (visited, idemp_end_bb->index);
   start_at_idemp_end = true;
 
   // For simplicity, idempotent regions cannot end at a phi node.
@@ -414,12 +414,12 @@ instrument_failure_site (gimple_stmt_iterator gsi_failure)
 static void
 insert_deref_assert (gimple_stmt_iterator *gsi, tree addr_var)
 {
-  gimple null_ptr_cmp, cast, call_expect, cond, call_fail;
-  gimple_stmt_iterator gsi_assert;
-  edge e_true, e_false;
-  basic_block bb_cond, bb_assert, bb_deref;
+  gimple null_ptr_cmp, cast, expect_call, cond, fail_call;
+  gimple_stmt_iterator assert_gsi;
+  edge true_e, false_e;
+  basic_block cond_bb, assert_bb, deref_bb;
 
-  bb_cond = gsi_bb (*gsi);
+  cond_bb = gsi_bb (*gsi);
 
   // Generate null pointer test.
   tree cmp_val = make_ssa_name (boolean_type_node, NULL);
@@ -431,31 +431,31 @@ insert_deref_assert (gimple_stmt_iterator *gsi, tree addr_var)
   tree cast_val = make_ssa_name (long_integer_type_node, NULL);
   cast = gimple_build_assign_with_ops (NOP_EXPR, cast_val, cmp_val, NULL_TREE);
   gsi_insert_before (gsi, cast, GSI_SAME_STMT);
-  call_expect = gimple_build_call (builtin_decl_explicit (BUILT_IN_EXPECT), 2, cast_val,
+  expect_call = gimple_build_call (builtin_decl_explicit (BUILT_IN_EXPECT), 2, cast_val,
     build_int_cst (long_integer_type_node, 0));
   tree expect_ret = make_ssa_name (long_integer_type_node, NULL);
-  gimple_call_set_lhs (call_expect, expect_ret);
-  gsi_insert_before (gsi, call_expect, GSI_SAME_STMT);
+  gimple_call_set_lhs (expect_call, expect_ret);
+  gsi_insert_before (gsi, expect_call, GSI_SAME_STMT);
 
   // Generate actual conditional jump to assertion failure.
   cond = gimple_build_cond (NE_EXPR, expect_ret,
     build_int_cst (long_integer_type_node, 0), NULL_TREE, NULL_TREE);
   gsi_insert_before (gsi, cond, GSI_SAME_STMT);
-  e_true = split_block (bb_cond, cond);
-  bb_deref = e_true->dest;
-  bb_assert = split_edge (e_true);
-  e_true = single_succ_edge (bb_cond);
-  e_false = make_edge (bb_cond, bb_deref, EDGE_FALSE_VALUE);
+  true_e = split_block (cond_bb, cond);
+  deref_bb = true_e->dest;
+  assert_bb = split_edge (true_e);
+  true_e = single_succ_edge (cond_bb);
+  false_e = make_edge (cond_bb, deref_bb, EDGE_FALSE_VALUE);
 
-  e_true->flags &= ~EDGE_FALLTHRU;
-  e_true->flags |= EDGE_TRUE_VALUE;
+  true_e->flags &= ~EDGE_FALLTHRU;
+  true_e->flags |= EDGE_TRUE_VALUE;
 
-  *gsi = gsi_last_bb (bb_cond);
+  *gsi = gsi_last_bb (cond_bb);
 
   // Insert the actual assertion failure exit (implemented as a trap).
-  gsi_assert = gsi_start_bb (bb_assert);
-  call_fail = gimple_build_call (builtin_decl_explicit (BUILT_IN_TRAP), 0);
-  gsi_insert_before (&gsi_assert, call_fail, GSI_SAME_STMT);
+  assert_gsi = gsi_start_bb (assert_bb);
+  fail_call = gimple_build_call (builtin_decl_explicit (BUILT_IN_TRAP), 0);
+  gsi_insert_before (&assert_gsi, fail_call, GSI_SAME_STMT);
 
 
   // TODO:
