@@ -8,6 +8,9 @@
 - TODO: Document pass in trunk/gcc/doc/invoke.texi
 - TODO: Remember to verify todos for after pass (e.g., clean_ssa, which requires
   marking new names to be done).
+- TODO: in the future we will have to update the profile info for every new
+  edges and blocks we create. I still don't know how this relates to
+  performance.
 
 - I coudn't find a way to verify if a function comes from a library, so I wasn't
   able to verify if the user may have overwritten functions like __assert_rtn
@@ -110,6 +113,10 @@ inter-procedural analysis, we need to change it for a global buffer.
 - Set/longjmps
 --------------
 
+- If we insert sjljs, GCC requires an edge from every effectful function call
+  to the dispacther block. That may cause a performance problem, by disabling
+  some optmizations. Try to see if we really need this even if our code is just
+  intra-procedural.
 - TODO: Mimic all properties setted in when setjmp/longjmp calls are found. Passes
   that run before ConAir can execute normally, even if they depend on the
   existence of setjmp/longjmps. All we have to guarantee is that future passes
@@ -119,3 +126,14 @@ inter-procedural analysis, we need to change it for a global buffer.
 BUG: longjmp call is replacing __trap_ call.
 - Verify if builtin setjmps can be used interprocedurally without any problem,
   because the labels seem to be local to the function.
+- TODO: assert, at the start of the pass, that DONT_USE_BUILTIN_SETJMP is not
+  defined.
+
+
+------
+- Wiki
+------
+
+- Adnormal edges and dispatcher block (also how this avoids code motion around
+  sjljs).
+- The need for abnormal edges from every effectful call to the dispatcher.

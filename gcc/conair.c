@@ -41,6 +41,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "coretypes.h"
 #include "tm.h"
 #include "tree.h"
+#include "tree-nested.h"
 #include "print-tree.h"
 #include "flags.h"
 #include "bitmap.h"
@@ -70,7 +71,9 @@ along with GCC; see the file COPYING3.  If not see
 static struct pointer_set_t *reexec_points;
 static bitmap headers_with_checkpoints;
 static bitmap cut_loops;
+static bool sjlj_infra_ready;
 static tree j_buffer;
+static basic_block dispatcher_bb;
 
 
 /* Verifies if a given STMT has side effects.  */
@@ -376,17 +379,65 @@ extract_reexec_points (gimple_stmt_iterator gsi_idemp_end)
 }
 
 
+/* Make sure that the infrastructure needed for setjmp/longjmp insertion is
+   initialized  */
+
+static void
+prepare_sjlj_infra ()
+{
+  gimple dispatcher_call;
+  gimple_stmt_iterator dispatcher_gsi;
+
+  if (sjlj_infra_ready)
+    return;
+
+  cfun->calls_setjmp = true;
+  cfun->has_nonlocal_label = 1;
+
+  // Initialize a 5 word local buffer to be used by setjmp and longjmp.
+  tree size = size_int (5 * BITS_PER_WORD / POINTER_SIZE - 1);
+  tree index = build_index_type (size);
+  tree type = build_array_type (ptr_type_node, index);
+
+  j_buffer = build_decl (DECL_SOURCE_LOCATION (current_function_decl),
+    VAR_DECL, get_identifier ("__conair_j_buf"), type);
+  TREE_STATIC (j_buffer) = 1;
+  TREE_ADDRESSABLE (j_buffer) = 1;
+  DECL_ARTIFICIAL (j_buffer) = 1;
+  DECL_INITIAL (j_buffer) = NULL;
+  varpool_finalize_decl (j_buffer);
+
+  // Create and insert a dispatcher block to receive all abnormal edges.
+  dispatcher_bb = create_empty_bb (ENTRY_BLOCK_PTR_FOR_FN (cfun));
+  dispatcher_bb->loop_father = ENTRY_BLOCK_PTR_FOR_FN (cfun)->loop_father;
+  dispatcher_gsi = gsi_start_bb (dispatcher_bb);
+  dispatcher_call = gimple_build_call_internal (IFN_ABNORMAL_DISPATCHER, 1,
+    boolean_false_node);
+  gsi_insert_after (&dispatcher_gsi, dispatcher_call, GSI_NEW_STMT);
+
+  if (dom_info_available_p (CDI_DOMINATORS))
+    set_immediate_dominator (CDI_DOMINATORS, dispatcher_bb,
+      ENTRY_BLOCK_PTR_FOR_FN (cfun));
+
+  sjlj_infra_ready = true;
+}
+
+
 /* Instrument a failure site with thread rollback code, i.e., reexecution
    counter and longjmp call.  */
 
 static void
 instrument_failure_site (gimple_stmt_iterator gsi_failure)
 {
+  prepare_sjlj_infra ();
+
+  // Insert longjmp call.
   tree buf_addr = build1 (ADDR_EXPR, build_pointer_type (ptr_type_node),
     j_buffer);
   gimple longjmp_call = gimple_build_call (builtin_decl_explicit
     (BUILT_IN_LONGJMP), 2, buf_addr, integer_one_node);
   gsi_insert_before (&gsi_failure, longjmp_call, GSI_SAME_STMT);
+  make_edge (gsi_bb (gsi_failure), dispatcher_bb, EDGE_ABNORMAL);
 }
 
 
@@ -457,16 +508,13 @@ insert_deref_assert (gimple_stmt_iterator *gsi, tree addr_var)
   fail_call = gimple_build_call (builtin_decl_explicit (BUILT_IN_TRAP), 0);
   gsi_insert_before (&assert_gsi, fail_call, GSI_SAME_STMT);
 
-
-  // TODO:
-  // . Update profile info.
-  // . Dump location info before assertion failure, to mimic actual assert.h
-  //    behavior.
+  // TODO: Dump location info before assertion failure, to mimic actual
+  // assert.h behavior.
 }
 
 
 /* Tranforms every other kind of failure point in assertion failures, so that
-   they can be handled in the same way later. */
+   they can be handled in the same way later.  */
 
 static void
 simplify_failure_sites ()
@@ -513,27 +561,6 @@ simplify_failure_sites ()
 }
 
 
-/* Declares a buffer local to the current function, for use with setjmp and
-   longjmp calls  */
-
-static void
-initialize_jmp_buffer ()
-{
-  // Setjmp and longjmp need a 5 word buffer.
-  tree size = size_int (5 * BITS_PER_WORD / POINTER_SIZE - 1);
-  tree index = build_index_type (size);
-  tree type = build_array_type (ptr_type_node, index);
-
-  j_buffer = build_decl (DECL_SOURCE_LOCATION (current_function_decl),
-    VAR_DECL, get_identifier ("__conair_j_buf"), type);
-  TREE_STATIC (j_buffer) = 1;
-  TREE_ADDRESSABLE (j_buffer) = 1;
-  DECL_ARTIFICIAL (j_buffer) = 1;
-  DECL_INITIAL (j_buffer) = NULL;
-  varpool_finalize_decl (j_buffer);
-}
-
-
 /* Main entry point for concurrency bug recovery instrumentation.  */
 
 static unsigned int
@@ -546,10 +573,10 @@ do_conair (void)
   // This pass requires loop info to work.
   gcc_assert (current_loops != NULL);
 
+  sjlj_infra_ready = false;
   reexec_points = pointer_set_create ();
   cut_loops = BITMAP_ALLOC (NULL);
   headers_with_checkpoints = BITMAP_ALLOC (NULL);
-  initialize_jmp_buffer ();
 
   // To keep idempotency at low level, no two variables can share the same stack
   // slot.
