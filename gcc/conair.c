@@ -67,16 +67,19 @@ along with GCC; see the file COPYING3.  If not see
 #include "tree-pass.h"
 #include "cfgloop.h"
 
+#define MAX_REEXEC_COUNT 10000
 
 static struct pointer_set_t *reexec_points;
 static bitmap headers_with_checkpoints;
 static bitmap cut_loops;
 static bool sjlj_infra_ready;
 static tree j_buffer;
+static tree reexec_counter;
+static gimple reexec_counter_reset_stmt;
 static basic_block dispatcher_bb;
 
 
-/* Verifies if a given STMT has side effects.  */
+/* Verifies if a given STMT has non-idempotent side effects.  */
 
 static bool
 stmt_idempotent_destroying_p (gimple stmt)
@@ -87,6 +90,10 @@ stmt_idempotent_destroying_p (gimple stmt)
 
   // Check for virtual definitions (wirte to heap, globals, aliased vars, etc).
   if (is_gimple_assign (stmt) && gimple_store_p (stmt))
+    return true;
+
+  // TODO: test this.
+  if (stmt == reexec_counter_reset_stmt)
     return true;
 
   return false;
@@ -366,7 +373,7 @@ extract_reexec_points (gimple_stmt_iterator gsi_idemp_end)
             {
           if (bitmap_set_bit (visited, e->src->index))
             stack.safe_push (e->src);
-            }  
+            } 
         }
     }
     }
@@ -386,7 +393,7 @@ static void
 prepare_sjlj_infra ()
 {
   gimple dispatcher_call;
-  gimple_stmt_iterator dispatcher_gsi;
+  gimple_stmt_iterator dispatcher_gsi, decl_gsi;
 
   if (sjlj_infra_ready)
     return;
@@ -415,29 +422,102 @@ prepare_sjlj_infra ()
     boolean_false_node);
   gsi_insert_after (&dispatcher_gsi, dispatcher_call, GSI_NEW_STMT);
 
-  if (dom_info_available_p (CDI_DOMINATORS))
-    set_immediate_dominator (CDI_DOMINATORS, dispatcher_bb,
-      ENTRY_BLOCK_PTR_FOR_FN (cfun));
+  // Create and initialize the reexecution counter.
+  reexec_counter = build_decl (DECL_SOURCE_LOCATION (current_function_decl),
+    VAR_DECL, get_identifier ("__conair_reexec_counter"), unsigned_type_node);
+  DECL_CONTEXT (reexec_counter) = current_function_decl;
+  DECL_ARTIFICIAL (reexec_counter) = 1;
+  DECL_GIMPLE_REG_P (reexec_counter) = 1;
+  TREE_READONLY (reexec_counter) = 0;
+  DECL_EXTERNAL (reexec_counter) = 0;
+  TREE_STATIC (reexec_counter) = 0;
+  TREE_ADDRESSABLE (reexec_counter) = 0;
+  TREE_THIS_VOLATILE (reexec_counter) = 0;
+  add_local_decl (cfun, reexec_counter);
+
+  reexec_counter_reset_stmt = gimple_build_assign (reexec_counter,
+    build_int_cst (unsigned_type_node, 0));
+  decl_gsi = gsi_start_bb (single_succ_edge (ENTRY_BLOCK_PTR_FOR_FN
+    (cfun))->dest);
+  gsi_insert_before (&decl_gsi, reexec_counter_reset_stmt, GSI_SAME_STMT);
 
   sjlj_infra_ready = true;
 }
 
 
 /* Instrument a failure site with thread rollback code, i.e., reexecution
-   counter and longjmp call.  */
+   counter test and longjmp call. Example:
+
+                                       |
+                             _________\|/_________
+                            | exec_c++            |
+         |                  | if (exec_c < MAX_C) |          /|\
+     ___\|/___              |_____________________|     ______|_______
+    | abort() |    --->         |             |        | DISPATCHER() |
+    |_________|               F |             | T      |______________|
+         |                  ___\|/___    ____\|/____         /|\
+        \|/                | abort() |  | longjmp() |         |
+                           |_________|  |___________|         |
+                                |             |               |
+                               \|/            '---------------'
+                                                abnormal flow
+*/
 
 static void
-instrument_failure_site (gimple_stmt_iterator gsi_failure)
+instrument_failure_site (gimple_stmt_iterator* failure_gsi)
 {
+  gimple counter_inc, counter_cmp, cast, expect_call, cond;
+  gimple_stmt_iterator reexec_gsi;
+  basic_block failure_bb, cond_bb, reexec_bb;
+  edge failure_e;
+
   prepare_sjlj_infra ();
 
-  // Insert longjmp call.
+  // Test the number of reexecution times.
+  // Insert reexecution counter increment.
+  counter_inc = gimple_build_assign_with_ops (PLUS_EXPR, reexec_counter,
+    reexec_counter, build_int_cst (unsigned_type_node, 1));
+  gsi_insert_before (failure_gsi, counter_inc, GSI_SAME_STMT);
+
+  // Insert reexecution counter test.
+  tree cmp_val = make_ssa_name (boolean_type_node, NULL);
+  tree cmp_expr = build2 (GT_EXPR, boolean_type_node, reexec_counter,
+    build_int_cst (unsigned_type_node, MAX_REEXEC_COUNT));
+  counter_cmp = gimple_build_assign (cmp_val, cmp_expr);
+  gsi_insert_before (failure_gsi, counter_cmp, GSI_SAME_STMT);
+
+  // Insert brach prediction hint using "__builtin_expect".
+  tree cast_val = make_ssa_name (long_integer_type_node, NULL);
+  cast = gimple_build_assign_with_ops (NOP_EXPR, cast_val, cmp_val, NULL_TREE);
+  gsi_insert_before (failure_gsi, cast, GSI_SAME_STMT);
+  expect_call = gimple_build_call (builtin_decl_explicit (BUILT_IN_EXPECT), 2, cast_val,
+    build_int_cst (long_integer_type_node, 0));
+  tree expect_ret = make_ssa_name (long_integer_type_node, NULL);
+  gimple_call_set_lhs (expect_call, expect_ret);
+  gsi_insert_before (failure_gsi, expect_call, GSI_SAME_STMT);
+
+  // Create a reexecution block and insert a conditional jump to it.
+  failure_bb = gsi_bb (*failure_gsi);
+  cond = gimple_build_cond (NE_EXPR, expect_ret,
+    build_int_cst (long_integer_type_node, 0), NULL_TREE, NULL_TREE);
+  gsi_insert_before (failure_gsi, cond, GSI_SAME_STMT);
+  failure_e = split_block (failure_bb, cond);
+  cond_bb = failure_e->src;
+  *failure_gsi = gsi_start_bb (failure_e->dest);
+  reexec_bb = create_empty_bb (cond_bb);
+  make_edge (cond_bb, reexec_bb, EDGE_TRUE_VALUE);
+  reexec_bb->loop_father = cond_bb->loop_father;
+  failure_e->flags &= ~EDGE_FALLTHRU;
+  failure_e->flags |= EDGE_FALSE_VALUE;
+
+  // Insert longjmp call in the reexecution block.
+  reexec_gsi = gsi_start_bb (reexec_bb);
   tree buf_addr = build1 (ADDR_EXPR, build_pointer_type (ptr_type_node),
     j_buffer);
   gimple longjmp_call = gimple_build_call (builtin_decl_explicit
     (BUILT_IN_LONGJMP), 2, buf_addr, integer_one_node);
-  gsi_insert_before (&gsi_failure, longjmp_call, GSI_SAME_STMT);
-  make_edge (gsi_bb (gsi_failure), dispatcher_bb, EDGE_ABNORMAL);
+  gsi_insert_before (&reexec_gsi, longjmp_call, GSI_SAME_STMT);
+  make_edge (reexec_bb, dispatcher_bb, EDGE_ABNORMAL);
 }
 
 
@@ -569,6 +649,10 @@ do_conair (void)
   basic_block bb;
   gimple_stmt_iterator gsi;
   gimple stmt;
+  struct pointer_set_t *instrumented_asserts;
+
+  // TODO: test if this function (simplification and instrumentation) works
+  // when there is more than one assertion failure in the same block.
 
   // This pass requires loop info to work.
   gcc_assert (current_loops != NULL);
@@ -577,6 +661,7 @@ do_conair (void)
   reexec_points = pointer_set_create ();
   cut_loops = BITMAP_ALLOC (NULL);
   headers_with_checkpoints = BITMAP_ALLOC (NULL);
+  instrumented_asserts = pointer_set_create ();
 
   // To keep idempotency at low level, no two variables can share the same stack
   // slot.
@@ -603,15 +688,16 @@ do_conair (void)
               || (strncmp (IDENTIFIER_POINTER (DECL_NAME (fndecl)), bsd_assert_fail, 12) == 0)
               || (strncmp (IDENTIFIER_POINTER (DECL_NAME (fndecl)), self_assert_fail, 14) == 0);
 
-          if (is_assert_fail) 
+          if (is_assert_fail && !pointer_set_insert (instrumented_asserts, stmt))
         {
           extract_reexec_points (gsi);
-          instrument_failure_site (gsi);
+          instrument_failure_site (&gsi);
         }
         }
     }
     }
 
+  pointer_set_destroy (instrumented_asserts);
   BITMAP_FREE (headers_with_checkpoints);
   BITMAP_FREE (cut_loops);
   pointer_set_destroy (reexec_points);

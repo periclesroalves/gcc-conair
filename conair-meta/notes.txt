@@ -2,6 +2,12 @@
 - General
 ---------
 
+- TODO: change the jump buffer declaration to look like the counter declaration
+  (local non-static). Remember to replace varpool_finalize. In the future,
+  change it to a thread variable.
+- TODO: during backwards DFS, when testing if we reached the entry block, test
+  against ENTRY_BLOCK_PTR_FOR_FN rather than the block index=0 (new blocks can
+  have index=0).
 - TODO: update loop and dominanace info for blocks created in
   insert_deref_assert (even with split block and split_edge) (see tree-complex.c
   1152 for example).
@@ -85,8 +91,6 @@ when looking for idempotent regions, we must consider the following:
       !!! remember that loops may have outer loops and bb->father_loop
       references only the innermost one.
 
-TODO: insert reexecution counters in failure sites (according to the paper, this
-is a global counter for the whole function).
 !!! if a idemp begin point is a phi instruction, then the intrumentation must be
 inserted at the beginning of the block (after phis, before statements).
 !!! Idempotency analysis is run for each failure site. Take care so we do not
@@ -106,7 +110,8 @@ points.
 !!! Try to avoid revisiting the same blocks when analysing different failure
 points.
 !!! Right now the jump buffer is local to a function. If we ever implement
-inter-procedural analysis, we need to change it for a global buffer.
+inter-procedural analysis, we need to change it for a global buffer (or a per
+thread buffer, as in the paper).
 
 
 --------------
@@ -128,6 +133,15 @@ BUG: longjmp call is replacing __trap_ call.
   because the labels seem to be local to the function.
 - TODO: assert, at the start of the pass, that DONT_USE_BUILTIN_SETJMP is not
   defined.
+- We use one counter per function to avoid the overhead of one counter per
+  failure site.
+- TODO: in the future, implement the reexecution counter as a thread variable,
+  not a local function variable (local counter may not work to weel with inter
+  procedural analysis). After doing that, revome the test that avoid reexecution
+  regions getting passed a counter reset (we also no longer need to save the
+  reset_stmt in a global var). We also need to take a look on how to perform SSA
+  update for global vars.
+- TODO: define the maximu reexecution counter for the function.
 
 
 ------
