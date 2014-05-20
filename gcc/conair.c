@@ -445,6 +445,54 @@ prepare_sjlj_infra ()
 }
 
 
+/* Insert after GSI a conditional jump based on CMP_EXPR, expected to be false.
+   The conditional is augmented with a branch prediction hint.  */
+
+static void
+insert_branch_expect_false (gimple_stmt_iterator* gsi, tree cmp_expr,
+  basic_block true_bb, basic_block false_bb)
+{
+  tree cmp_val, cast_val, expect_ret;
+  gimple cmp_stmt, cast_stmt, expect_call, cond;
+  basic_block cond_bb;
+  edge true_e, false_e;
+
+  // Insert comparison expression.
+  cmp_val = make_ssa_name (boolean_type_node, NULL);
+  cmp_stmt = gimple_build_assign (cmp_val, cmp_expr);
+  gsi_insert_after (gsi, cmp_stmt, GSI_NEW_STMT);
+
+  // Insert brach prediction hint using "__builtin_expect".
+  cast_val = make_ssa_name (long_integer_type_node, NULL);
+  cast_stmt = gimple_build_assign_with_ops (NOP_EXPR, cast_val, cmp_val, NULL_TREE);
+  gsi_insert_after (gsi, cast_stmt, GSI_NEW_STMT);
+  expect_call = gimple_build_call (builtin_decl_explicit (BUILT_IN_EXPECT), 2, cast_val,
+    build_int_cst (long_integer_type_node, 0));
+  expect_ret = make_ssa_name (long_integer_type_node, NULL);
+  gimple_call_set_lhs (expect_call, expect_ret);
+  gsi_insert_after (gsi, expect_call, GSI_NEW_STMT);
+
+  // Insert the actual branch.
+  cond = gimple_build_cond (NE_EXPR, expect_ret,
+    build_int_cst (long_integer_type_node, 0), NULL_TREE, NULL_TREE);
+  gsi_insert_after (gsi, cond, GSI_NEW_STMT);
+  cond_bb = gsi_bb (*gsi);
+  true_e = find_edge (cond_bb, true_bb);
+  false_e = find_edge (cond_bb, false_bb);
+
+  if (!true_e)
+    true_e = make_edge (cond_bb, true_bb, EDGE_TRUE_VALUE);
+
+  if (!false_e)
+    false_e = make_edge (cond_bb, false_bb, EDGE_FALSE_VALUE);
+
+  true_e->flags &= ~EDGE_FALLTHRU;
+  true_e->flags |= EDGE_TRUE_VALUE;
+  false_e->flags &= ~EDGE_FALLTHRU;
+  false_e->flags |= EDGE_FALSE_VALUE; 
+}
+
+
 /* Instrument a failure site with thread rollback code, i.e., reexecution
    counter test and longjmp call. Example:
 
@@ -466,49 +514,37 @@ prepare_sjlj_infra ()
 static void
 instrument_failure_site (gimple_stmt_iterator* failure_gsi)
 {
-  gimple counter_inc, counter_cmp, cast, expect_call, cond;
-  gimple_stmt_iterator reexec_gsi;
+  tree cmp_expr;
+  gimple counter_inc, nop;
+  gimple_stmt_iterator reexec_gsi, cond_gsi;
   basic_block failure_bb, cond_bb, reexec_bb;
   edge failure_e;
 
   prepare_sjlj_infra ();
 
-  // Test the number of reexecution times.
+  // TODO: Test the number of reexecution times.
   // Insert reexecution counter increment.
   counter_inc = gimple_build_assign_with_ops (PLUS_EXPR, reexec_counter,
     reexec_counter, build_int_cst (unsigned_type_node, 1));
   gsi_insert_before (failure_gsi, counter_inc, GSI_SAME_STMT);
 
-  // Insert reexecution counter test.
-  tree cmp_val = make_ssa_name (boolean_type_node, NULL);
-  tree cmp_expr = build2 (GT_EXPR, boolean_type_node, reexec_counter,
-    build_int_cst (unsigned_type_node, MAX_REEXEC_COUNT));
-  counter_cmp = gimple_build_assign (cmp_val, cmp_expr);
-  gsi_insert_before (failure_gsi, counter_cmp, GSI_SAME_STMT);
-
-  // Insert brach prediction hint using "__builtin_expect".
-  tree cast_val = make_ssa_name (long_integer_type_node, NULL);
-  cast = gimple_build_assign_with_ops (NOP_EXPR, cast_val, cmp_val, NULL_TREE);
-  gsi_insert_before (failure_gsi, cast, GSI_SAME_STMT);
-  expect_call = gimple_build_call (builtin_decl_explicit (BUILT_IN_EXPECT), 2, cast_val,
-    build_int_cst (long_integer_type_node, 0));
-  tree expect_ret = make_ssa_name (long_integer_type_node, NULL);
-  gimple_call_set_lhs (expect_call, expect_ret);
-  gsi_insert_before (failure_gsi, expect_call, GSI_SAME_STMT);
-
-  // Create a reexecution block and insert a conditional jump to it.
-  failure_bb = gsi_bb (*failure_gsi);
-  cond = gimple_build_cond (NE_EXPR, expect_ret,
-    build_int_cst (long_integer_type_node, 0), NULL_TREE, NULL_TREE);
-  gsi_insert_before (failure_gsi, cond, GSI_SAME_STMT);
-  failure_e = split_block (failure_bb, cond);
+  // Create different blocks for the failure and reexecution sites.
+  nop = gimple_build_nop (); // Split placeholder.
+  gsi_insert_before (failure_gsi, nop, GSI_SAME_STMT);
+  failure_e = split_block (gsi_bb (*failure_gsi), nop);
+  failure_bb = failure_e->dest;
+  *failure_gsi = gsi_start_bb (failure_bb);
   cond_bb = failure_e->src;
-  *failure_gsi = gsi_start_bb (failure_e->dest);
+  cond_gsi = gsi_last_bb (cond_bb);
+  gsi_remove (&cond_gsi, true); // Remove placeholder.
+  cond_gsi = gsi_last_bb (cond_bb);
   reexec_bb = create_empty_bb (cond_bb);
-  make_edge (cond_bb, reexec_bb, EDGE_TRUE_VALUE);
   reexec_bb->loop_father = cond_bb->loop_father;
-  failure_e->flags &= ~EDGE_FALLTHRU;
-  failure_e->flags |= EDGE_FALSE_VALUE;
+
+  // Insert the reexecution counter test.
+  cmp_expr = build2 (GT_EXPR, boolean_type_node, reexec_counter, build_int_cst
+    (unsigned_type_node, MAX_REEXEC_COUNT));
+  insert_branch_expect_false (&cond_gsi, cmp_expr, failure_bb, reexec_bb);
 
   // Insert longjmp call in the reexecution block.
   reexec_gsi = gsi_start_bb (reexec_bb);
@@ -545,45 +581,29 @@ instrument_failure_site (gimple_stmt_iterator* failure_gsi)
 static void
 insert_deref_assert (gimple_stmt_iterator *gsi, tree addr_var)
 {
-  gimple null_ptr_cmp, cast, expect_call, cond, fail_call;
+  tree cmp_expr;
+  gimple fail_call, nop;
   gimple_stmt_iterator assert_gsi;
-  edge true_e, false_e;
   basic_block cond_bb, assert_bb, deref_bb;
+  edge e;
 
-  cond_bb = gsi_bb (*gsi);
-
-  // Generate null pointer test.
-  tree cmp_val = make_ssa_name (boolean_type_node, NULL);
-  tree cmp_expr = build2 (EQ_EXPR, boolean_type_node, addr_var, null_pointer_node);
-  null_ptr_cmp = gimple_build_assign (cmp_val, cmp_expr);
-  gsi_insert_before (gsi, null_ptr_cmp, GSI_SAME_STMT);
-
-  // Insert brach prediction hint using "__builtin_expect".
-  tree cast_val = make_ssa_name (long_integer_type_node, NULL);
-  cast = gimple_build_assign_with_ops (NOP_EXPR, cast_val, cmp_val, NULL_TREE);
-  gsi_insert_before (gsi, cast, GSI_SAME_STMT);
-  expect_call = gimple_build_call (builtin_decl_explicit (BUILT_IN_EXPECT), 2, cast_val,
-    build_int_cst (long_integer_type_node, 0));
-  tree expect_ret = make_ssa_name (long_integer_type_node, NULL);
-  gimple_call_set_lhs (expect_call, expect_ret);
-  gsi_insert_before (gsi, expect_call, GSI_SAME_STMT);
-
-  // Generate actual conditional jump to assertion failure.
-  cond = gimple_build_cond (NE_EXPR, expect_ret,
-    build_int_cst (long_integer_type_node, 0), NULL_TREE, NULL_TREE);
-  gsi_insert_before (gsi, cond, GSI_SAME_STMT);
-  true_e = split_block (cond_bb, cond);
-  deref_bb = true_e->dest;
-  assert_bb = split_edge (true_e);
-  true_e = single_succ_edge (cond_bb);
-  false_e = make_edge (cond_bb, deref_bb, EDGE_FALSE_VALUE);
-
-  true_e->flags &= ~EDGE_FALLTHRU;
-  true_e->flags |= EDGE_TRUE_VALUE;
-
+  // Create a new block for the assertion failure.
+  nop = gimple_build_nop (); // Split placeholder.
+  gsi_insert_before (gsi, nop, GSI_SAME_STMT);
+  e = split_block (gsi_bb (*gsi), nop);
+  deref_bb = e->dest;
+  cond_bb = e->src;
   *gsi = gsi_last_bb (cond_bb);
+  gsi_remove (gsi, true); // Remove placeholder.
+  *gsi = gsi_last_bb (cond_bb);
+  assert_bb = split_edge (e);
+  e = single_succ_edge (cond_bb);
 
-  // Insert the actual assertion failure exit (implemented as a trap).
+  // Insert the actual null pointer test.
+  cmp_expr = build2 (EQ_EXPR, boolean_type_node, addr_var, null_pointer_node);
+  insert_branch_expect_false (gsi, cmp_expr, assert_bb, deref_bb);
+
+  // Insert the assertion failure exit (implemented as a trap).
   assert_gsi = gsi_start_bb (assert_bb);
   fail_call = gimple_build_call (builtin_decl_explicit (BUILT_IN_TRAP), 0);
   gsi_insert_before (&assert_gsi, fail_call, GSI_SAME_STMT);
