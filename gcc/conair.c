@@ -79,6 +79,145 @@ static gimple reexec_counter_reset_stmt;
 static basic_block dispatcher_bb;
 
 
+/* Make sure that the infrastructure needed for setjmp/longjmp insertion is
+   initialized  */
+
+static void
+prepare_sjlj_infra ()
+{
+  gimple dispatcher_call;
+  gimple_stmt_iterator dispatcher_gsi, decl_gsi;
+
+  if (sjlj_infra_ready)
+    return;
+
+  cfun->calls_setjmp = true;
+  cfun->has_nonlocal_label = 1;
+
+  // Initialize a 5 word local buffer to be used by setjmp and longjmp.
+  tree size = size_int (5 * BITS_PER_WORD / POINTER_SIZE - 1);
+  tree index = build_index_type (size);
+  tree type = build_array_type (ptr_type_node, index);
+
+  j_buffer = build_decl (DECL_SOURCE_LOCATION (current_function_decl),
+    VAR_DECL, get_identifier ("__conair_j_buf"), type);
+  TREE_STATIC (j_buffer) = 1;
+  TREE_ADDRESSABLE (j_buffer) = 1;
+  DECL_ARTIFICIAL (j_buffer) = 1;
+  DECL_INITIAL (j_buffer) = NULL;
+  varpool_finalize_decl (j_buffer);
+
+  // Create and insert a dispatcher block to receive all abnormal edges.
+  dispatcher_bb = create_empty_bb (ENTRY_BLOCK_PTR_FOR_FN (cfun));
+  dispatcher_bb->loop_father = ENTRY_BLOCK_PTR_FOR_FN (cfun)->loop_father;
+  dispatcher_gsi = gsi_start_bb (dispatcher_bb);
+  dispatcher_call = gimple_build_call_internal (IFN_ABNORMAL_DISPATCHER, 1,
+    boolean_false_node);
+  gsi_insert_after (&dispatcher_gsi, dispatcher_call, GSI_NEW_STMT);
+
+  // Create and initialize the reexecution counter.
+  reexec_counter = build_decl (DECL_SOURCE_LOCATION (current_function_decl),
+    VAR_DECL, get_identifier ("__conair_reexec_counter"), unsigned_type_node);
+  DECL_CONTEXT (reexec_counter) = current_function_decl;
+  DECL_ARTIFICIAL (reexec_counter) = 1;
+  DECL_GIMPLE_REG_P (reexec_counter) = 1;
+  TREE_READONLY (reexec_counter) = 0;
+  DECL_EXTERNAL (reexec_counter) = 0;
+  TREE_STATIC (reexec_counter) = 0;
+  TREE_ADDRESSABLE (reexec_counter) = 0;
+  TREE_THIS_VOLATILE (reexec_counter) = 0;
+  add_local_decl (cfun, reexec_counter);
+
+  reexec_counter_reset_stmt = gimple_build_assign (reexec_counter,
+    build_int_cst (unsigned_type_node, 0));
+  decl_gsi = gsi_start_bb (single_succ_edge (ENTRY_BLOCK_PTR_FOR_FN
+    (cfun))->dest);
+  gsi_insert_before (&decl_gsi, reexec_counter_reset_stmt, GSI_SAME_STMT);
+
+  sjlj_infra_ready = true;
+}
+
+
+/* Insert a stjmp call before REEXEC_GSI.  */
+
+static void
+insert_setjmp_before (gimple_stmt_iterator reexec_gsi)
+{
+  tree receiver_label = create_artificial_label (UNKNOWN_LOCATION);
+  gimple_stmt_iterator receiver_gsi;
+  tree label_addr, buf_addr;
+  basic_block setup_bb, receiver_bb, cont_bb;
+  gimple setup_call, receiver_call, label_stmt;
+  edge cont_e;
+
+  FORCED_LABEL (receiver_label) = 1;
+
+  // Build '__builtin_setjmp_setup (j_BUFFER, RECEIVER_LABEL)' and insert.
+  label_addr = build_addr (receiver_label, current_function_decl);
+  buf_addr = build1 (ADDR_EXPR, build_pointer_type (ptr_type_node), j_buffer);
+  setup_call = gimple_build_call (builtin_decl_explicit (BUILT_IN_SETJMP_SETUP),
+    2, buf_addr, label_addr);
+  gsi_insert_before (&reexec_gsi, setup_call, GSI_SAME_STMT);
+
+  // Make different blocks for setup and receiver calls.
+  cont_e = split_block (gsi_bb (reexec_gsi), setup_call);
+  setup_bb = cont_e->src;
+  cont_bb = cont_e->dest;
+  receiver_bb = split_edge (cont_e);
+  redirect_edge_succ (single_succ_edge (setup_bb), cont_bb);
+
+  // Build 'RECEIVER_LABEL:' and insert.
+  receiver_gsi = gsi_start_bb (receiver_bb);
+  label_stmt = gimple_build_label (receiver_label);
+  gsi_insert_after (&receiver_gsi, label_stmt, GSI_NEW_STMT);
+
+  // Build '__builtin_setjmp_receiver (RECEIVER_LABEL)' and insert.
+  receiver_call = gimple_build_call (builtin_decl_explicit (BUILT_IN_SETJMP_RECEIVER), 1,
+    label_addr);
+  gsi_insert_after (&receiver_gsi, receiver_call, GSI_NEW_STMT);
+
+  make_edge (dispatcher_bb, receiver_bb, EDGE_ABNORMAL);
+}
+
+
+/* Instrument the reexecution point STMT with a setjmp call.  */
+
+static bool
+instrument_reexec_point (const void *stmt_ptr, void *data ATTRIBUTE_UNUSED)
+{
+  gimple stmt;
+  gimple_stmt_iterator gsi;
+  basic_block bb;
+  edge e;
+  edge_iterator ei;
+
+  prepare_sjlj_infra ();
+
+  stmt = (gimple) stmt_ptr;
+  bb = gimple_bb (stmt);
+
+  // A reexecution point must be a real instruction.
+  if (gimple_code (stmt) == GIMPLE_PHI)
+    stmt = gsi_stmt (gsi_start_bb (bb));
+
+  if (stmt != last_stmt (bb))
+    {
+      gsi = gsi_for_stmt (stmt);
+      gsi_next (&gsi);
+      insert_setjmp_before (gsi);
+    }
+  else
+    {
+      FOR_EACH_EDGE (e, ei, bb->succs)
+    {
+      insert_setjmp_before (gsi_start_bb (e->dest));
+    }
+    }
+
+  return true;
+}
+
+
 /* Verifies if a given STMT has non-idempotent side effects.  */
 
 static bool
@@ -362,7 +501,7 @@ extract_reexec_points (gimple_stmt_iterator gsi_idemp_end)
       // Stop at function entry if no other idempotent start point was found.
       if (bb->index == 0)
         {
-          gimple idemp_begin_point = gsi_stmt (gsi_start_bb (bb));
+          gimple idemp_begin_point = gsi_stmt (gsi_start_bb (single_succ (bb)));
           register_reexec_point (idemp_begin_point, true);
         }
       else
@@ -383,65 +522,6 @@ extract_reexec_points (gimple_stmt_iterator gsi_idemp_end)
 
   BITMAP_FREE (visited);
   stack.release ();
-}
-
-
-/* Make sure that the infrastructure needed for setjmp/longjmp insertion is
-   initialized  */
-
-static void
-prepare_sjlj_infra ()
-{
-  gimple dispatcher_call;
-  gimple_stmt_iterator dispatcher_gsi, decl_gsi;
-
-  if (sjlj_infra_ready)
-    return;
-
-  cfun->calls_setjmp = true;
-  cfun->has_nonlocal_label = 1;
-
-  // Initialize a 5 word local buffer to be used by setjmp and longjmp.
-  tree size = size_int (5 * BITS_PER_WORD / POINTER_SIZE - 1);
-  tree index = build_index_type (size);
-  tree type = build_array_type (ptr_type_node, index);
-
-  j_buffer = build_decl (DECL_SOURCE_LOCATION (current_function_decl),
-    VAR_DECL, get_identifier ("__conair_j_buf"), type);
-  TREE_STATIC (j_buffer) = 1;
-  TREE_ADDRESSABLE (j_buffer) = 1;
-  DECL_ARTIFICIAL (j_buffer) = 1;
-  DECL_INITIAL (j_buffer) = NULL;
-  varpool_finalize_decl (j_buffer);
-
-  // Create and insert a dispatcher block to receive all abnormal edges.
-  dispatcher_bb = create_empty_bb (ENTRY_BLOCK_PTR_FOR_FN (cfun));
-  dispatcher_bb->loop_father = ENTRY_BLOCK_PTR_FOR_FN (cfun)->loop_father;
-  dispatcher_gsi = gsi_start_bb (dispatcher_bb);
-  dispatcher_call = gimple_build_call_internal (IFN_ABNORMAL_DISPATCHER, 1,
-    boolean_false_node);
-  gsi_insert_after (&dispatcher_gsi, dispatcher_call, GSI_NEW_STMT);
-
-  // Create and initialize the reexecution counter.
-  reexec_counter = build_decl (DECL_SOURCE_LOCATION (current_function_decl),
-    VAR_DECL, get_identifier ("__conair_reexec_counter"), unsigned_type_node);
-  DECL_CONTEXT (reexec_counter) = current_function_decl;
-  DECL_ARTIFICIAL (reexec_counter) = 1;
-  DECL_GIMPLE_REG_P (reexec_counter) = 1;
-  TREE_READONLY (reexec_counter) = 0;
-  DECL_EXTERNAL (reexec_counter) = 0;
-  TREE_STATIC (reexec_counter) = 0;
-  TREE_ADDRESSABLE (reexec_counter) = 0;
-  TREE_THIS_VOLATILE (reexec_counter) = 0;
-  add_local_decl (cfun, reexec_counter);
-
-  reexec_counter_reset_stmt = gimple_build_assign (reexec_counter,
-    build_int_cst (unsigned_type_node, 0));
-  decl_gsi = gsi_start_bb (single_succ_edge (ENTRY_BLOCK_PTR_FOR_FN
-    (cfun))->dest);
-  gsi_insert_before (&decl_gsi, reexec_counter_reset_stmt, GSI_SAME_STMT);
-
-  sjlj_infra_ready = true;
 }
 
 
@@ -716,6 +796,8 @@ do_conair (void)
         }
     }
     }
+
+  pointer_set_traverse (reexec_points, instrument_reexec_point, NULL);
 
   pointer_set_destroy (instrumented_asserts);
   BITMAP_FREE (headers_with_checkpoints);

@@ -142,6 +142,8 @@ BUG: longjmp call is replacing __trap_ call.
   reset_stmt in a global var). We also need to take a look on how to perform SSA
   update for global vars.
 - TODO: define the maximu reexecution counter for the function.
+- TODO: verify if the fact of longjmp being considered a effectful function (a
+  faiulure site) is not a mistake, as longjmps are inserted before setjmps.
 
 
 ------
