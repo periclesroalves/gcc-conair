@@ -118,7 +118,7 @@ thread buffer, as in the paper).
 - Set/longjmps
 --------------
 
-- If we insert sjljs, GCC requires an edge from every effectful function call
+!!! If we insert sjljs, GCC requires an edge from every effectful function call
   to the dispacther block. That may cause a performance problem, by disabling
   some optmizations. Try to see if we really need this even if our code is just
   intra-procedural.
