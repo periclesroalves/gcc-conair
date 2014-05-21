@@ -72,7 +72,7 @@ along with GCC; see the file COPYING3.  If not see
 static struct pointer_set_t *reexec_points;
 static bitmap headers_with_checkpoints;
 static bitmap cut_loops;
-static bool sjlj_infra_ready;
+static bool sjlj_infra_initialized;
 static tree j_buffer;
 static tree reexec_counter;
 static gimple reexec_counter_reset_stmt;
@@ -88,7 +88,7 @@ prepare_sjlj_infra ()
   gimple dispatcher_call;
   gimple_stmt_iterator dispatcher_gsi, decl_gsi;
 
-  if (sjlj_infra_ready)
+  if (sjlj_infra_initialized)
     return;
 
   cfun->calls_setjmp = true;
@@ -134,14 +134,64 @@ prepare_sjlj_infra ()
     (cfun))->dest);
   gsi_insert_before (&decl_gsi, reexec_counter_reset_stmt, GSI_SAME_STMT);
 
-  sjlj_infra_ready = true;
+  sjlj_infra_initialized = true;
 }
 
 
-/* Insert a stjmp call before REEXEC_GSI.  */
+/* Create an abnormal edge from every effectful call to the dispatcher block.
+   We assume that effectful calls that already are the last instruction in a
+   block do not need any modification. Note that blocks are split if needed.  */
 
 static void
-insert_setjmp_before (gimple_stmt_iterator reexec_gsi)
+link_effectful_calls ()
+{
+  gimple stmt;
+  gimple_stmt_iterator gsi;
+  basic_block bb;
+
+  // TODO: test this function.
+
+  FOR_EACH_BB_FN (bb, cfun)
+    {
+      bool should_end_bb = false;
+      gimple prev_stmt;
+
+      for (gsi = gsi_start_bb (bb); !gsi_end_p (gsi); gsi_next (&gsi))
+    {
+      stmt = gsi_stmt(gsi);
+       
+      if (should_end_bb) {
+        edge e = split_block (bb, prev_stmt);
+        make_edge (e->src, dispatcher_bb, EDGE_ABNORMAL);
+      }
+
+      should_end_bb = is_gimple_call (stmt) && gimple_has_side_effects (stmt);
+
+      if (should_end_bb)
+        prev_stmt = stmt;
+    }
+    }
+}
+
+
+/* Insert a stjmp call before GSI. Example:
+
+                         |
+                     ___\|/___
+     |              | setup() |         ______________
+   _\|/__           |_________|   ____\|/_____        |
+  | STMT |    --->       |       | receiver() |       |
+  |______|               |       |____________|       |
+     |                   |    _______|     |          |
+    \|/                _\|/_\|/_     _____\|/______   |
+                      |  STMT   |   | DISPATCHER() |  |
+                      |_________|   |______________|  |
+                           |               |__________|
+                          \|/              abnormal flow
+*/
+
+static void
+insert_setjmp_before (gimple_stmt_iterator gsi)
 {
   tree receiver_label = create_artificial_label (UNKNOWN_LOCATION);
   gimple_stmt_iterator receiver_gsi;
@@ -157,10 +207,10 @@ insert_setjmp_before (gimple_stmt_iterator reexec_gsi)
   buf_addr = build1 (ADDR_EXPR, build_pointer_type (ptr_type_node), j_buffer);
   setup_call = gimple_build_call (builtin_decl_explicit (BUILT_IN_SETJMP_SETUP),
     2, buf_addr, label_addr);
-  gsi_insert_before (&reexec_gsi, setup_call, GSI_SAME_STMT);
+  gsi_insert_before (&gsi, setup_call, GSI_SAME_STMT);
 
   // Make different blocks for setup and receiver calls.
-  cont_e = split_block (gsi_bb (reexec_gsi), setup_call);
+  cont_e = split_block (gsi_bb (gsi), setup_call);
   setup_bb = cont_e->src;
   cont_bb = cont_e->dest;
   receiver_bb = split_edge (cont_e);
@@ -177,6 +227,7 @@ insert_setjmp_before (gimple_stmt_iterator reexec_gsi)
   gsi_insert_after (&receiver_gsi, receiver_call, GSI_NEW_STMT);
 
   make_edge (dispatcher_bb, receiver_bb, EDGE_ABNORMAL);
+  make_edge (receiver_bb, dispatcher_bb, EDGE_ABNORMAL);
 }
 
 
@@ -757,7 +808,7 @@ do_conair (void)
   // This pass requires loop info to work.
   gcc_assert (current_loops != NULL);
 
-  sjlj_infra_ready = false;
+  sjlj_infra_initialized = false;
   reexec_points = pointer_set_create ();
   cut_loops = BITMAP_ALLOC (NULL);
   headers_with_checkpoints = BITMAP_ALLOC (NULL);
@@ -798,6 +849,10 @@ do_conair (void)
     }
 
   pointer_set_traverse (reexec_points, instrument_reexec_point, NULL);
+
+  // If setjmps were inserted, all effectful calls need edges to the dispatcher.
+  if (sjlj_infra_initialized)
+    link_effectful_calls ();
 
   pointer_set_destroy (instrumented_asserts);
   BITMAP_FREE (headers_with_checkpoints);
