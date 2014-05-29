@@ -101,11 +101,14 @@ prepare_sjlj_infra ()
 
   j_buffer = build_decl (DECL_SOURCE_LOCATION (current_function_decl),
     VAR_DECL, get_identifier ("__conair_j_buf"), type);
-  TREE_STATIC (j_buffer) = 1;
-  TREE_ADDRESSABLE (j_buffer) = 1;
+  DECL_CONTEXT (j_buffer) = current_function_decl;
   DECL_ARTIFICIAL (j_buffer) = 1;
-  DECL_INITIAL (j_buffer) = NULL;
-  varpool_finalize_decl (j_buffer);
+  TREE_ADDRESSABLE (j_buffer) = 1;
+  TREE_STATIC (j_buffer) = 0;
+  DECL_EXTERNAL (j_buffer) = 0;
+  TREE_READONLY (j_buffer) = 0;
+  TREE_THIS_VOLATILE (j_buffer) = 0;
+  add_local_decl (cfun, j_buffer);
 
   // Create and insert a dispatcher block to receive all abnormal edges.
   dispatcher_bb = create_empty_bb (ENTRY_BLOCK_PTR_FOR_FN (cfun));
@@ -159,7 +162,7 @@ link_effectful_calls ()
       for (gsi = gsi_start_bb (bb); !gsi_end_p (gsi); gsi_next (&gsi))
     {
       stmt = gsi_stmt(gsi);
-       
+
       if (should_end_bb) {
         edge e = split_block (bb, prev_stmt);
         make_edge (e->src, dispatcher_bb, EDGE_ABNORMAL);
@@ -241,8 +244,6 @@ instrument_reexec_point (const void *stmt_ptr, void *data ATTRIBUTE_UNUSED)
   basic_block bb;
   edge e;
   edge_iterator ei;
-
-  prepare_sjlj_infra ();
 
   stmt = (gimple) stmt_ptr;
   bb = gimple_bb (stmt);
@@ -430,7 +431,7 @@ register_reexec_point (gimple stmt, bool update_loop_cuts)
 
       while ((loop = loop_outer (loop)) != NULL)
     {
-      bitmap_set_bit (cut_loops, loop->num); 
+      bitmap_set_bit (cut_loops, loop->num);
     }
     }
 }
@@ -549,21 +550,18 @@ extract_reexec_points (gimple_stmt_iterator gsi_idemp_end)
       if (bb == bb->loop_father->header)
         insert_loop_header_checkpoint (bb);
 
-      // Stop at function entry if no other idempotent start point was found.
+      // Stop at counter reset if no other idempotent start point was found.
       if (bb->index == 0)
-        {
-          gimple idemp_begin_point = gsi_stmt (gsi_start_bb (single_succ (bb)));
-          register_reexec_point (idemp_begin_point, true);
-        }
+        register_reexec_point (reexec_counter_reset_stmt, true);
       else
         {
           edge_iterator ei;
-  
+
           FOR_EACH_EDGE (e, ei, bb->preds)
             {
           if (bitmap_set_bit (visited, e->src->index))
             stack.safe_push (e->src);
-            } 
+            }
         }
     }
     }
@@ -620,7 +618,7 @@ insert_branch_expect_false (gimple_stmt_iterator* gsi, tree cmp_expr,
   true_e->flags &= ~EDGE_FALLTHRU;
   true_e->flags |= EDGE_TRUE_VALUE;
   false_e->flags &= ~EDGE_FALLTHRU;
-  false_e->flags |= EDGE_FALSE_VALUE; 
+  false_e->flags |= EDGE_FALSE_VALUE;
 }
 
 
@@ -650,8 +648,6 @@ instrument_failure_site (gimple_stmt_iterator* failure_gsi)
   gimple_stmt_iterator reexec_gsi, cond_gsi;
   basic_block failure_bb, cond_bb, reexec_bb;
   edge failure_e;
-
-  prepare_sjlj_infra ();
 
   // TODO: Test the number of reexecution times.
   // Insert reexecution counter increment.
@@ -690,7 +686,7 @@ instrument_failure_site (gimple_stmt_iterator* failure_gsi)
 
 /* Inserts an assertion before the dereference pointed by GSI in block BB to
    verify that ADDR_VAR holds a somewhat valid address. Example:
-    
+
                                  |
         |                 ______\|/_______
      __\|/___            |      ...       |
@@ -841,6 +837,7 @@ do_conair (void)
 
           if (is_assert_fail && !pointer_set_insert (instrumented_asserts, stmt))
         {
+          prepare_sjlj_infra ();
           extract_reexec_points (gsi);
           instrument_failure_site (&gsi);
         }

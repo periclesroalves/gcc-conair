@@ -2,9 +2,6 @@
 - General
 ---------
 
-- TODO: change the jump buffer declaration to look like the counter declaration
-  (local non-static). Remember to replace varpool_finalize. In the future,
-  change it to a thread variable.
 - TODO: during backwards DFS, when testing if we reached the entry block, test
   against ENTRY_BLOCK_PTR_FOR_FN rather than the block index=0 (new blocks can
   have index=0).
@@ -17,6 +14,9 @@
 - TODO: in the future we will have to update the profile info for every new
   edges and blocks we create. I still don't know how this relates to
   performance.
+
+!!! A reexecution region is useless if it doesn't encompass global
+readings/loads.
 
 - I coudn't find a way to verify if a function comes from a library, so I wasn't
   able to verify if the user may have overwritten functions like __assert_rtn
@@ -84,15 +84,14 @@ when looking for idempotent regions, we must consider the following:
       that was cut. (this can generate a big number of useless reexecution
       points. See if we can reduce this number by verifying if loops were cut
       when handling reads inside loops)
+        . As we are in a loop, it doesn't matter if the read comes after or
+        before the failure point in the body (this can be demonstrated using the
+        basic loop counter example).
       !!! Verify if this is actually working.
       !!! Opt: we don't actually need cuts after all reads, but just that every
       read do not reach a failure site without passing through a reexecution
       point.
-      !!! remember that loops may have outer loops and bb->father_loop
-      references only the innermost one.
 
-!!! if a idemp begin point is a phi instruction, then the intrumentation must be
-inserted at the beginning of the block (after phis, before statements).
 !!! Idempotency analysis is run for each failure site. Take care so we do not
 insert a reexection point in the same place more than once. Maybe we could
 maintain a set of already analysed blocks. We would still have the problem of
@@ -105,8 +104,11 @@ all failure sites)).
 !!! it looks like simple induction variables are not in SSA form (probably being
 considered stores). Verify that (maybe it's just my example, which captures the
 induction var address).
-!!! Maybe at the end we can run a static analysi to remove redundant reexecution
-points.
+!!! Maybe at the end we can run a static analysis to remove redundant reexecution
+points. Every read must pass through a reexecution point before reaching a
+failure point (for all paths). Maybe an instance of taint-flow analysis.
+Actualy, every setjmp that crosses another setjmp before reaching a longjmp in
+all paths is useless.
 !!! Try to avoid revisiting the same blocks when analysing different failure
 points.
 !!! Right now the jump buffer is local to a function. If we ever implement
@@ -128,7 +130,6 @@ thread buffer, as in the paper).
   will be aware of the setjmps we inserted. Be carefull to verify that every pass
   that sets program properties based on the existence of setjmp/longjmps are
   replicated in our code.
-BUG: longjmp call is replacing __trap_ call.
 - Verify if builtin setjmps can be used interprocedurally without any problem,
   because the labels seem to be local to the function.
 - TODO: assert, at the start of the pass, that DONT_USE_BUILTIN_SETJMP is not
@@ -142,8 +143,6 @@ BUG: longjmp call is replacing __trap_ call.
   reset_stmt in a global var). We also need to take a look on how to perform SSA
   update for global vars.
 - TODO: define the maximu reexecution counter for the function.
-- TODO: verify if the fact of longjmp being considered a effectful function (a
-  faiulure site) is not a mistake, as longjmps are inserted before setjmps.
 
 
 ------
