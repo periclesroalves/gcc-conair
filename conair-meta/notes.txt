@@ -2,6 +2,8 @@
 - General
 ---------
 
+- TODO: verify if the variables in setjmp/longjmp regions need to be marked
+  volatile (see gcc mail list).)
 - TODO: during backwards DFS, when testing if we reached the entry block, test
   against ENTRY_BLOCK_PTR_FOR_FN rather than the block index=0 (new blocks can
   have index=0).
@@ -111,15 +113,21 @@ Actualy, every setjmp that crosses another setjmp before reaching a longjmp in
 all paths is useless.
 !!! Try to avoid revisiting the same blocks when analysing different failure
 points.
-!!! Right now the jump buffer is local to a function. If we ever implement
-inter-procedural analysis, we need to change it for a global buffer (or a per
-thread buffer, as in the paper).
+!!! Right now the jump buffer is static global. We need to change it for per
+thread buffer, as in the paper. (Actually, while we just perform
+inter-procedural optimizations, we can keep the buffer local to the function and
+pass its address to the proxy function. This works because we know that the
+taken setjmp will be always after the buffer declaration (check this), so when
+setjmp restores the registers, the stack is also restored).
 
 
 --------------
 - Set/longjmps
 --------------
 
+- TODO: verify if the proxy function is not already declared in the current
+  scope.
+- TODO: fix the pass dump.
 !!! If we insert sjljs, GCC requires an edge from every effectful function call
   to the dispacther block. That may cause a performance problem, by disabling
   some optmizations. Try to see if we really need this even if our code is just

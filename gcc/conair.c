@@ -56,6 +56,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "is-a.h"
 #include "gimple.h"
 #include "cgraph.h"
+#include "tree-dump.h"
 #include "gimplify.h"
 #include "gimple-iterator.h"
 #include "gimple-ssa.h"
@@ -63,6 +64,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "tree-phinodes.h"
 #include "ssa-iterators.h"
 #include "stringpool.h"
+#include "tree-iterator.h"
 #include "tree-ssanames.h"
 #include "tree-pass.h"
 #include "cfgloop.h"
@@ -73,10 +75,81 @@ static struct pointer_set_t *reexec_points;
 static bitmap headers_with_checkpoints;
 static bitmap cut_loops;
 static bool sjlj_infra_initialized;
-static tree j_buffer;
+static tree j_buffer = NULL;
 static tree reexec_counter;
+static tree longjmp_proxy_fn;
 static gimple reexec_counter_reset_stmt;
 static basic_block dispatcher_bb;
+
+
+/* GCC implements builtin setjmp/longjmp using the non-local GOTO machinery,
+   which requires the target to be in a different function. Seen that, we use a
+   proxy function to call longjmp. The only statement in the function body is
+   the longjmp call. We prefer a proxy for longjmps instead of setjmps simply
+   because setjmps are supposed to be called way more often.  */
+
+static void
+build_longjmp_proxy_fn ()
+{
+  // TODO: make sure that this fn is not declared yet.
+
+  tree decl, arg_type, type, name, ret, param, block, body, longjmp_call;
+  location_t loc;
+  opt_pass* save_cpass;
+
+  // Build the proxy function declaration.
+  loc = input_location;
+  name = get_identifier ("__conair_longjmp proxy");
+  arg_type = build_pointer_type (build_pointer_type (ptr_type_node));
+  type = build_function_type_list (void_type_node, arg_type, NULL_TREE);
+  decl = build_decl (loc, FUNCTION_DECL, name, type);
+
+  SET_DECL_ASSEMBLER_NAME (decl, name);
+
+  DECL_EXTERNAL (decl) = 0;
+  TREE_PUBLIC (decl) = 0;
+  TREE_STATIC (decl) = 1;
+  TREE_USED (decl) = 1;
+  DECL_ARTIFICIAL (decl) = 1;
+  DECL_PRESERVE_P (decl) = 1;
+  DECL_UNINLINABLE (decl) = 1;
+  TREE_NOTHROW (decl) = 1;
+
+  ret = build_decl (loc, RESULT_DECL, NULL_TREE, void_type_node);
+  DECL_ARTIFICIAL (ret) = 1;
+  DECL_CONTEXT (ret) = decl;
+  DECL_RESULT (decl) = ret;
+
+  param = build_decl (loc, PARM_DECL, get_identifier ("jbuf_addr"), arg_type);
+  DECL_ARTIFICIAL (param) = 1;
+  DECL_ARG_TYPE (param) = arg_type;
+  DECL_CONTEXT (param) = decl;
+  TREE_USED (param) = 1;
+  DECL_ARGUMENTS (decl) = param;
+
+  block = make_node (BLOCK);
+  TREE_USED (block) = 1;
+  DECL_INITIAL (decl) = block;
+
+  // Insert the actual longjmp call.
+  body = NULL;
+  longjmp_call = build_call_expr (builtin_decl_explicit
+    (BUILT_IN_LONGJMP), 2, DECL_ARGUMENTS (decl), integer_one_node);
+  append_to_statement_list (longjmp_call, &body);
+  DECL_SAVED_TREE (decl) = body;
+
+  // Add function to the call-graph.
+  push_struct_function (decl);
+  cfun->function_end_locus = loc;
+  gimplify_function_tree (decl);
+
+  save_cpass = current_pass;
+  cgraph_add_new_function (decl, false);
+  current_pass = save_cpass;
+  pop_cfun();
+
+  longjmp_proxy_fn = decl;
+}
 
 
 /* Make sure that the infrastructure needed for setjmp/longjmp insertion is
@@ -94,7 +167,11 @@ prepare_sjlj_infra ()
   cfun->calls_setjmp = true;
   cfun->has_nonlocal_label = 1;
 
-  // Initialize a 5 word local buffer to be used by setjmp and longjmp.
+  // Initialize a 5 word buffer to be used by setjmp and longjmp. This buffer
+  // can be kept local to the function because we know that the target of a
+  // longjmp will always appear after this declarestion, so it remains valid
+  // after register/stack restoring. If the analysis is ever changed to work
+  // inter-procedurally, this property will no longer be true.
   tree size = size_int (5 * BITS_PER_WORD / POINTER_SIZE - 1);
   tree index = build_index_type (size);
   tree type = build_array_type (ptr_type_node, index);
@@ -127,7 +204,6 @@ prepare_sjlj_infra ()
   TREE_READONLY (reexec_counter) = 0;
   DECL_EXTERNAL (reexec_counter) = 0;
   TREE_STATIC (reexec_counter) = 0;
-  TREE_ADDRESSABLE (reexec_counter) = 0;
   TREE_THIS_VOLATILE (reexec_counter) = 0;
   add_local_decl (cfun, reexec_counter);
 
@@ -136,6 +212,8 @@ prepare_sjlj_infra ()
   decl_gsi = gsi_start_bb (single_succ_edge (ENTRY_BLOCK_PTR_FOR_FN
     (cfun))->dest);
   gsi_insert_before (&decl_gsi, reexec_counter_reset_stmt, GSI_SAME_STMT);
+
+  build_longjmp_proxy_fn ();
 
   sjlj_infra_initialized = true;
 }
@@ -623,33 +701,32 @@ insert_branch_expect_false (gimple_stmt_iterator* gsi, tree cmp_expr,
 
 
 /* Instrument a failure site with thread rollback code, i.e., reexecution
-   counter test and longjmp call. Example:
+   counter test and a longjmp_proxy call. Example:
 
-                                       |
-                             _________\|/_________
-                            | exec_c++            |
-         |                  | if (exec_c < MAX_C) |          /|\
-     ___\|/___              |_____________________|     ______|_______
-    | abort() |    --->         |             |        | DISPATCHER() |
-    |_________|               F |             | T      |______________|
-         |                  ___\|/___    ____\|/____         /|\
-        \|/                | abort() |  | longjmp() |         |
-                           |_________|  |___________|         |
-                                |             |               |
-                               \|/            '---------------'
+                                    |
+                          _________\|/_________
+                         | exec_c++            |
+        |                | if (exec_c < MAX_C) |              /|\
+    ___\|/___            |_____________________|         ______|_______
+   | abort() |   --->        |             |            | DISPATCHER() |
+   |_________|             F |             | T          |______________|
+        |                ___\|/___    ____\|/__________       /|\
+       \|/              | abort() |  | longjmp_proxy() |       |
+                        |_________|  |_________________|       |
+                             |                |                |
+                            \|/               '----------------'
                                                 abnormal flow
 */
 
 static void
 instrument_failure_site (gimple_stmt_iterator* failure_gsi)
 {
-  tree cmp_expr;
-  gimple counter_inc, nop;
+  tree cmp_expr, buf_addr;
+  gimple counter_inc, nop, longjmp_proxy_call;
   gimple_stmt_iterator reexec_gsi, cond_gsi;
   basic_block failure_bb, cond_bb, reexec_bb;
   edge failure_e;
 
-  // TODO: Test the number of reexecution times.
   // Insert reexecution counter increment.
   counter_inc = gimple_build_assign_with_ops (PLUS_EXPR, reexec_counter,
     reexec_counter, build_int_cst (unsigned_type_node, 1));
@@ -673,13 +750,12 @@ instrument_failure_site (gimple_stmt_iterator* failure_gsi)
     (unsigned_type_node, MAX_REEXEC_COUNT));
   insert_branch_expect_false (&cond_gsi, cmp_expr, failure_bb, reexec_bb);
 
-  // Insert longjmp call in the reexecution block.
+  // Insert longjmp_proxy call in the reexecution block. We insert an abnormal
+  // edge to avoid code motion within the setjmp/longjmp_proxy region.
   reexec_gsi = gsi_start_bb (reexec_bb);
-  tree buf_addr = build1 (ADDR_EXPR, build_pointer_type (ptr_type_node),
-    j_buffer);
-  gimple longjmp_call = gimple_build_call (builtin_decl_explicit
-    (BUILT_IN_LONGJMP), 2, buf_addr, integer_one_node);
-  gsi_insert_before (&reexec_gsi, longjmp_call, GSI_SAME_STMT);
+  buf_addr = build1 (ADDR_EXPR, build_pointer_type (ptr_type_node), j_buffer);
+  longjmp_proxy_call = gimple_build_call (longjmp_proxy_fn, 1, buf_addr);
+  gsi_insert_before (&reexec_gsi, longjmp_proxy_call, GSI_SAME_STMT);
   make_edge (reexec_bb, dispatcher_bb, EDGE_ABNORMAL);
 }
 
