@@ -88,18 +88,25 @@ static basic_block dispatcher_bb;
    the longjmp call. We prefer a proxy for longjmps instead of setjmps simply
    because setjmps are supposed to be called way more often.  */
 
-static void
+static tree
 build_longjmp_proxy_fn ()
 {
-  // TODO: make sure that this fn is not declared yet.
+  // TODO: test to see if registers are actually restored.
 
   tree decl, arg_type, type, name, ret, param, block, body, longjmp_call;
   location_t loc;
+  cgraph_node *node;
   opt_pass* save_cpass;
+
+  // Verify if the proxy function was already defined in this scope.
+  name = get_identifier ("__conair_longjmp_proxy");
+  node = cgraph_node_for_asm (name);
+
+  if (node)
+    return node->decl;
 
   // Build the proxy function declaration.
   loc = input_location;
-  name = get_identifier ("__conair_longjmp proxy");
   arg_type = build_pointer_type (build_pointer_type (ptr_type_node));
   type = build_function_type_list (void_type_node, arg_type, NULL_TREE);
   decl = build_decl (loc, FUNCTION_DECL, name, type);
@@ -148,7 +155,7 @@ build_longjmp_proxy_fn ()
   current_pass = save_cpass;
   pop_cfun();
 
-  longjmp_proxy_fn = decl;
+  return decl;
 }
 
 
@@ -213,7 +220,7 @@ prepare_sjlj_infra ()
     (cfun))->dest);
   gsi_insert_before (&decl_gsi, reexec_counter_reset_stmt, GSI_SAME_STMT);
 
-  build_longjmp_proxy_fn ();
+  longjmp_proxy_fn = build_longjmp_proxy_fn ();
 
   sjlj_infra_initialized = true;
 }
@@ -312,7 +319,7 @@ insert_setjmp_before (gimple_stmt_iterator gsi)
 }
 
 
-/* Instrument the reexecution point STMT with a setjmp call.  */
+/* Instrument the reexecution point after STMT with a setjmp call.  */
 
 static bool
 instrument_reexec_point (const void *stmt_ptr, void *data ATTRIBUTE_UNUSED)
@@ -881,10 +888,10 @@ do_conair (void)
   gcc_assert (current_loops != NULL);
 
   sjlj_infra_initialized = false;
+  instrumented_asserts = pointer_set_create ();
   reexec_points = pointer_set_create ();
   cut_loops = BITMAP_ALLOC (NULL);
   headers_with_checkpoints = BITMAP_ALLOC (NULL);
-  instrumented_asserts = pointer_set_create ();
 
   // To keep idempotency at low level, no two variables can share the same stack
   // slot.
@@ -927,10 +934,10 @@ do_conair (void)
   if (sjlj_infra_initialized)
     link_effectful_calls ();
 
-  pointer_set_destroy (instrumented_asserts);
   BITMAP_FREE (headers_with_checkpoints);
   BITMAP_FREE (cut_loops);
   pointer_set_destroy (reexec_points);
+  pointer_set_destroy (instrumented_asserts);
 
   return 0;
 }
