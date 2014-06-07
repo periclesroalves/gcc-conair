@@ -96,7 +96,8 @@ build_longjmp_proxy_fn ()
   tree decl, arg_type, type, name, ret, param, block, body, longjmp_call;
   location_t loc;
   cgraph_node *node;
-  opt_pass* save_cpass;
+  opt_pass *save_cpass;
+  FILE *save_dump_file;
 
   // Verify if the proxy function was already defined in this scope.
   name = get_identifier ("__conair_longjmp_proxy");
@@ -145,15 +146,16 @@ build_longjmp_proxy_fn ()
   append_to_statement_list (longjmp_call, &body);
   DECL_SAVED_TREE (decl) = body;
 
-  // Add function to the call-graph.
+  // Add function to the call-graph (saving the current function and pass state).
   push_struct_function (decl);
-  cfun->function_end_locus = loc;
+  pop_cfun ();
   gimplify_function_tree (decl);
 
   save_cpass = current_pass;
+  save_dump_file = dump_file;
   cgraph_add_new_function (decl, false);
+  dump_file = save_dump_file;
   current_pass = save_cpass;
-  pop_cfun();
 
   return decl;
 }
@@ -246,7 +248,7 @@ link_effectful_calls ()
 
       for (gsi = gsi_start_bb (bb); !gsi_end_p (gsi); gsi_next (&gsi))
     {
-      stmt = gsi_stmt(gsi);
+      stmt = gsi_stmt (gsi);
 
       if (should_end_bb) {
         edge e = split_block (bb, prev_stmt);
@@ -549,7 +551,7 @@ inspect_cut_loops ()
 
       FOR_EACH_IMM_USE_STMT (stmt, ui, var)
         {
-          struct loop * common_loop = find_common_loop(loop,
+          struct loop * common_loop = find_common_loop (loop,
             (gimple_bb (stmt))->loop_father);
 
           // Test if the use is inside the current loop.
