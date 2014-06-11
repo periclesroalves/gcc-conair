@@ -10,28 +10,28 @@ The technique behind ConAir is divided into three main steps, whose implementati
 
   - Failure site identification.
     - Assertion failures and assert functions.
-      - <__assert_rtn and __assert_fail>.
+      - {__assert_rtn and __assert_fail}.
     - Instrumenting pointer dereferences.
-      - <__builtin_trap>.
+      - {__builtin_trap}.
   - Re-execution point identification.
     - Defining idempotent code.
-      - <traditional idempotent-destroying operations>.
-      - <explain backwards DFS>.
+      - {traditional idempotent-destroying operations}.
+      - {explain backwards DFS}.
     - Idempotency on the GCC SSA representation.
-      - <real and virtual operands>.
-      - <link to GCC summit SSA paper>.
-      - <stack and register sharing>.
+      - {real and virtual operands}.
+      - {link to GCC summit SSA paper}.
+      - {stack and register sharing}.
     - Dynamic reassignments and loop checkpoints.
-      - <link to Marc's paper>.
+      - {link to Marc's paper}.
   - Rollback instrumentation.
     - The choice for setjmp/longjmp.
-      - <register restoring properties>.
-      - <Avoid code motion into idempotent regions>.
+      - {register restoring properties}.
+      - {Avoid code motion into idempotent regions}.
     - GCC built-in setjmp/longjmp.
-      - <reuse of non-local goto machinery>.
-      - <the need for a dispatcher block and abnormal edges>.
-      - <the need for a proxy function>.
-      - <linking effectful calls>.
+      - {reuse of non-local goto machinery}.
+      - {the need for a dispatcher block and abnormal edges}.
+      - {the need for a proxy function}.
+      - {linking effectful calls}.
 
 
 ## TODO List
