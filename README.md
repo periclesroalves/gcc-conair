@@ -1,10 +1,34 @@
 # ConAir for GCC in a Nutshell
 
-Concurrent programming is a notably hard task. Even though developers often have a number of tools in hand to help them avoid concurrency bugs during development, managing concurrent resource access, particularly for large code bases, is still highly error-prone. Thus, it comes as no surprise that even industrial quality software often contain a number of hidden concurrency bugs after deployment. Such bugs when exposed to the end user usually end up in severe failures. Even when developers are notified of a failure in deployed software, fixing concurrency bugs may still be harder than avoiding them, as their causes are usually hard to identify. This scenario exposes the need for a technique capable of making computer programs able to recover from concurrency failures in an automated way.
+<p style='text-align: justify;'>Concurrent programming is a notably hard task.
+Even though developers often have a number of tools in hand to help them avoid
+concurrency bugs during development, managing concurrent resource access,
+particularly for large code bases, is still highly error-prone. Thus, it comes
+as no surprise that even industrial quality software often contain a number of
+hidden concurrency bugs after deployment. Such bugs when exposed to the end user
+usually end up in severe failures. Even when developers are notified of a
+failure in deployed software, fixing concurrency bugs may still be harder than
+avoiding them, as their causes are usually hard to identify. This scenario
+exposes the need for a technique capable of making computer programs able to
+recover from concurrency failures in an automated way.</p>
 
-ConAir [link to paper] is a tool designed to instrument existing source-code with concurrency bug recovery and survival capabilities. It does so by means of re-execution of idempotent [link to idempotency] code. Right before the program reaches a failure state that is caused by the inconsistency of resources shared with other threads, i.e., global variables and acquired resources, ConAir rolls back the thread being executed. By doing that a number of times, re-executing a region of idempotent code, we hope that the state exposed by other threads becomes consistent. When that happens, execution is resumed and the failure state is no longer reached, thus recovering from a concurrency bug.
+<p style='text-align: justify;'>ConAir [link to paper] is a tool designed to
+instrument existing source-code with concurrency bug recovery and survival
+capabilities. It does so by means of re-execution of idempotent [link to
+idempotency] code. Right before the program reaches a failure state that is
+caused by the inconsistency of resources shared with other threads, i.e., global
+variables and acquired resources, ConAir rolls back the thread being executed.
+By doing that a number of times, re-executing a region of idempotent code, we
+hope that the state exposed by other threads becomes consistent. When that
+happens, execution is resumed and the failure state is no longer reached, thus
+recovering from a concurrency bug.</p>
 
-In this article we describe the implementation of ConAir in GCC, the GNU Compiler Collection. Our main goal here is to provide a development overview and expose the technical challenges of implementing this tool in an industrial-strength compiler. For a detailed explanation of the theory behind the tool and its underlying algorithms, please refer to the main ConAir paper [link to paper].
+<p style='text-align: justify;'>In this article we describe the implementation
+of ConAir in GCC, the GNU Compiler Collection. Our main goal here is to provide
+a development overview and expose the technical challenges of implementing this
+tool in an industrial-strength compiler. For a detailed explanation of the
+theory behind the tool and its underlying algorithms, please refer to the main
+ConAir paper [link to paper].</p>
 
 The technique behind ConAir is divided into three main steps, whose implementation is explained in the following sections of this text:
 
