@@ -2,6 +2,8 @@
 - General
 ---------
 
+- TODO: GCC is recognizing the setjmp/longjmps we insert as a loop. Change the
+  SSA fixup pass to avois this.
 - TODO: verify if the variables in setjmp/longjmp regions need to be marked
   volatile (see gcc mail list).)
 - TODO: during backwards DFS, when testing if we reached the entry block, test
