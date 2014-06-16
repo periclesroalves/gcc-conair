@@ -91,8 +91,6 @@ static basic_block dispatcher_bb;
 static tree
 build_longjmp_proxy_fn ()
 {
-  // TODO: test to see if registers are actually restored.
-
   tree decl, arg_type, type, name, ret, param, block, body, longjmp_call;
   location_t loc;
   cgraph_node *node;
@@ -933,8 +931,11 @@ do_conair (void)
   pointer_set_traverse (reexec_points, instrument_reexec_point, NULL);
 
   // If setjmps were inserted, all effectful calls need edges to the dispatcher.
-  if (sjlj_infra_initialized)
+  // Also, dominance info is no longer consistent.
+  if (sjlj_infra_initialized) {
     link_effectful_calls ();
+    free_dominance_info (CDI_DOMINATORS);
+  }
 
   BITMAP_FREE (headers_with_checkpoints);
   BITMAP_FREE (cut_loops);
