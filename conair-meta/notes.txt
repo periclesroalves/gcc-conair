@@ -153,6 +153,9 @@ setjmp restores the registers, the stack is also restored).
   reset_stmt in a global var). We also need to take a look on how to perform SSA
   update for global vars.
 - TODO: define the maximu reexecution counter for the function.
+- While fixing the SSA net, we currently verify each definition in the graph to
+  see if it is problematic. Change this to a more constrained search (only
+  blocks that can be reached from an assertion block and can reach a setjmp).
 
 
 ------

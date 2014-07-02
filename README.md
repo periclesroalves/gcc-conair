@@ -55,7 +55,19 @@ The technique behind ConAir is divided into three main steps, whose implementati
       - {reuse of non-local goto machinery}.
       - {the need for a dispatcher block and abnormal edges}.
       - {the need for a proxy function}.
-      - {linking effectful calls}.
+      - {linking effectful calls: effectful functions may contain longjmps to
+        the function that calls them, so every effectful call needs an abnormal
+        edge to the dispatcher block.}.
+      - Fixing the SSA net.
+        - {How instrumentation breaks the SSA form: uses not dominated by a
+          definition}.
+        - {Why in fact definitions will never be skipped}.
+        - {A problematic definition, that doesn't dominate at least one of its
+          uses, can be fixed by telling GCC to replace it by a new name, which
+          will be automatically fixed by GCC's SSA update pass}.
+        - {After the instrumentation we traverse the graph looking for
+          problematic definitions, telling GCC to fix them}.
+        
 
 
 ## TODO List
