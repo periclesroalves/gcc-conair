@@ -66,7 +66,6 @@ along with GCC; see the file COPYING3.  If not see
 #include "stringpool.h"
 #include "tree-iterator.h"
 #include "tree-ssanames.h"
-#include "tree-into-ssa.h"
 #include "tree-pass.h"
 #include "cfgloop.h"
 
@@ -259,49 +258,6 @@ link_effectful_calls ()
       if (should_end_bb)
         prev_stmt = stmt;
     }
-    }
-}
-
-
-/* During rollback instrumentation we may break the SSA net. One of the ways
-   this may happen is when a definition no longer dominates an use, due to the
-   fact that every longjmp and setjmp is linked to the same dispatcher block.
-   GCC's update_ssa pass will not fix this cases automatically, then we must do
-   so by hand.  */
-
-static void
-fix_ssa_net ()
-{
-  size_t i;
-  tree name;
-  gimple def_stmt, use_stmt;
-  basic_block def_bb, use_bb;
-  imm_use_iterator ui;
-
-  free_dominance_info (CDI_DOMINATORS);
-  calculate_dominance_info (CDI_DOMINATORS);
-
-  for (i = 1; i < num_ssa_names; i++)
-    {
-      name = ssa_name (i);
-  
-      if (!name)
-        continue;
-
-      def_stmt = SSA_NAME_DEF_STMT (name);
-      def_bb = gimple_bb (def_stmt);
-
-      if (!def_bb)
-        continue;
-  
-        FOR_EACH_IMM_USE_STMT (use_stmt, ui, name)
-      {
-        use_bb = gimple_bb (use_stmt);
- 
-        // If a definition does not dominate an use, mark it to be fixed.
-        if (use_bb != def_bb && !dominated_by_p (CDI_DOMINATORS, use_bb, def_bb))
-          create_new_def_for (name, def_stmt, NULL);
-      }
     }
 }
 
@@ -977,7 +933,7 @@ do_conair (void)
   // In case the graph was instrumented, do some final fixup work.
   if (sjlj_infra_initialized) {
     link_effectful_calls ();
-    fix_ssa_net ();
+    free_dominance_info (CDI_DOMINATORS);
   }
 
   BITMAP_FREE (headers_with_checkpoints);

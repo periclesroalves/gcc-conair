@@ -58,7 +58,8 @@ The technique behind ConAir is divided into three main steps, whose implementati
       - {linking effectful calls: effectful functions may contain longjmps to
         the function that calls them, so every effectful call needs an abnormal
         edge to the dispatcher block.}.
-      - Fixing the SSA net.
+      - [Deprecated - replace this by the new algortith for multiple dispatcher
+        blocks] Fixing the SSA net.
         - {How instrumentation breaks the SSA form: uses not dominated by a
           definition}.
         - {Why in fact definitions will never be skipped}.
