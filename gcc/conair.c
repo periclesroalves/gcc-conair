@@ -71,15 +71,15 @@ along with GCC; see the file COPYING3.  If not see
 
 #define MAX_REEXEC_COUNT 10000
 
-static struct pointer_set_t *reexec_points;
+static vec<gimple> reexec_points;
+static vec<basic_block> reexec_point_dispatchers;
 static bitmap headers_with_checkpoints;
 static bitmap cut_loops;
-static bool sjlj_infra_initialized;
 static tree j_buffer = NULL;
 static tree reexec_counter;
 static tree longjmp_proxy_fn;
 static gimple reexec_counter_reset_stmt;
-static basic_block dispatcher_bb;
+static basic_block current_dispatcher_bb;
 
 
 /* GCC implements builtin setjmp/longjmp using the non-local GOTO machinery,
@@ -159,24 +159,38 @@ build_longjmp_proxy_fn ()
 }
 
 
+/* Create and insert a new dispatcher block to receive abnormal edges. Also set
+   the newly created block as the current dispatcher.  */
+
+static void
+create_new_dispatcher ()
+{
+  gimple dispatcher_call;
+  gimple_stmt_iterator dispatcher_gsi;
+
+  current_dispatcher_bb = create_empty_bb (ENTRY_BLOCK_PTR_FOR_FN (cfun));
+  current_dispatcher_bb->loop_father = ENTRY_BLOCK_PTR_FOR_FN (cfun)->loop_father;
+  dispatcher_gsi = gsi_start_bb (current_dispatcher_bb);
+  dispatcher_call = gimple_build_call_internal (IFN_ABNORMAL_DISPATCHER, 1,
+    boolean_false_node);
+  gsi_insert_after (&dispatcher_gsi, dispatcher_call, GSI_NEW_STMT);
+}
+
+
 /* Make sure that the infrastructure needed for setjmp/longjmp insertion is
    initialized  */
 
 static void
 prepare_sjlj_infra ()
 {
-  gimple dispatcher_call;
-  gimple_stmt_iterator dispatcher_gsi, decl_gsi;
-
-  if (sjlj_infra_initialized)
-    return;
+  gimple_stmt_iterator decl_gsi;
 
   cfun->calls_setjmp = true;
   cfun->has_nonlocal_label = 1;
 
   // Initialize a 5 word buffer to be used by setjmp and longjmp. This buffer
   // can be kept local to the function because we know that the target of a
-  // longjmp will always appear after this declarestion, so it remains valid
+  // longjmp will always appear after this declaration, so it remains valid
   // after register/stack restoring. If the analysis is ever changed to work
   // inter-procedurally, this property will no longer be true.
   tree size = size_int (5 * BITS_PER_WORD / POINTER_SIZE - 1);
@@ -193,14 +207,6 @@ prepare_sjlj_infra ()
   TREE_READONLY (j_buffer) = 0;
   TREE_THIS_VOLATILE (j_buffer) = 0;
   add_local_decl (cfun, j_buffer);
-
-  // Create and insert a dispatcher block to receive all abnormal edges.
-  dispatcher_bb = create_empty_bb (ENTRY_BLOCK_PTR_FOR_FN (cfun));
-  dispatcher_bb->loop_father = ENTRY_BLOCK_PTR_FOR_FN (cfun)->loop_father;
-  dispatcher_gsi = gsi_start_bb (dispatcher_bb);
-  dispatcher_call = gimple_build_call_internal (IFN_ABNORMAL_DISPATCHER, 1,
-    boolean_false_node);
-  gsi_insert_after (&dispatcher_gsi, dispatcher_call, GSI_NEW_STMT);
 
   // Create and initialize the reexecution counter.
   reexec_counter = build_decl (DECL_SOURCE_LOCATION (current_function_decl),
@@ -221,14 +227,39 @@ prepare_sjlj_infra ()
   gsi_insert_before (&decl_gsi, reexec_counter_reset_stmt, GSI_SAME_STMT);
 
   longjmp_proxy_fn = build_longjmp_proxy_fn ();
-
-  sjlj_infra_initialized = true;
 }
 
 
-/* Create an abnormal edge from every effectful call to the dispatcher block.
-   We assume that effectful calls that already are the last instruction in a
-   block do not need any modification. Note that blocks are split if needed.  */
+/* Register a new reexecution point as well as the dispatcher block to which it
+   should be linked. It also updates the set of loops containing at least one
+   reexecution point in their body.  */
+
+static void
+register_reexec_point (gimple stmt, bool update_loop_cuts)
+{
+  // TODO: turn this two lists in a single list of struct elements, FGS.
+  // Repetition is allowed and expected, as a reexecution point can be linked
+  // to more than one failure site.
+  reexec_points.safe_push (stmt);
+  reexec_point_dispatchers.safe_push (current_dispatcher_bb);
+
+  if (update_loop_cuts)
+    {
+      struct loop *loop = (gimple_bb (stmt))->loop_father;
+      bitmap_set_bit (cut_loops, loop->num);
+
+      while ((loop = loop_outer (loop)) != NULL)
+    {
+      bitmap_set_bit (cut_loops, loop->num);
+    }
+    }
+}
+
+
+/* Create an abnormal edge from every effectful call to a dispatcher block,
+   which will later be linked to the setjmp on the function entry. We assume
+   that effectful calls that already are the last instruction in a block do not
+   need any modification. Note that blocks are split if needed.  */
 
 static void
 link_effectful_calls ()
@@ -237,7 +268,10 @@ link_effectful_calls ()
   gimple_stmt_iterator gsi;
   basic_block bb;
 
-  // TODO: test this function.
+  // TODO: test this function (maybe we don't need to link the functions, but just to split the block).
+
+  create_new_dispatcher ();
+  register_reexec_point (reexec_counter_reset_stmt, true);
 
   FOR_EACH_BB_FN (bb, cfun)
     {
@@ -250,7 +284,7 @@ link_effectful_calls ()
 
       if (should_end_bb) {
         edge e = split_block (bb, prev_stmt);
-        make_edge (e->src, dispatcher_bb, EDGE_ABNORMAL);
+        make_edge (e->src, current_dispatcher_bb, EDGE_ABNORMAL);
       }
 
       should_end_bb = is_gimple_call (stmt) && gimple_has_side_effects (stmt);
@@ -262,7 +296,9 @@ link_effectful_calls ()
 }
 
 
-/* Insert a stjmp call before GSI. Example:
+/* Insert a setjmp call before GSI and link it to DISPATCHER through an
+   abnormal edge. If LINK_ONLY is true, the setjmp call is expected to already
+   exist and all we need to do is to link the dispatcher block. Example:
 
                          |
                      ___\|/___
@@ -279,18 +315,42 @@ link_effectful_calls ()
 */
 
 static void
-insert_setjmp_before (gimple_stmt_iterator gsi)
+insert_setjmp_before (gimple_stmt_iterator gsi, basic_block dispatcher_bb, bool link_only)
 {
-  tree receiver_label = create_artificial_label (UNKNOWN_LOCATION);
+  tree receiver_label;
   gimple_stmt_iterator receiver_gsi;
   tree label_addr, buf_addr;
   basic_block setup_bb, receiver_bb, cont_bb;
   gimple setup_call, receiver_call, label_stmt;
   edge cont_e;
+  edge_iterator ei;
 
+  if (link_only)
+    {
+      cont_bb = (single_succ_edge (gsi_bb (gsi)))->dest;
+
+      // Look for the receiver block amongst the predecessors and link it.
+      FOR_EACH_EDGE (cont_e, ei, cont_bb->preds)
+    {
+      receiver_bb = cont_e->src;
+      receiver_call = last_stmt (receiver_bb);
+
+      if (receiver_call && is_gimple_call (receiver_call) &&
+        DECL_FUNCTION_CODE (gimple_call_fndecl (receiver_call)) ==
+          BUILT_IN_SETJMP_RECEIVER)
+        {
+          make_edge (dispatcher_bb, receiver_bb, EDGE_ABNORMAL);
+          return;
+        }
+    }
+
+      gcc_unreachable ();
+    }
+
+  receiver_label = create_artificial_label (UNKNOWN_LOCATION);
   FORCED_LABEL (receiver_label) = 1;
 
-  // Build '__builtin_setjmp_setup (j_BUFFER, RECEIVER_LABEL)' and insert.
+  // Build '__builtin_setjmp_setup (J_BUFFER, RECEIVER_LABEL)' and insert.
   label_addr = build_addr (receiver_label, current_function_decl);
   buf_addr = build1 (ADDR_EXPR, build_pointer_type (ptr_type_node), j_buffer);
   setup_call = gimple_build_call (builtin_decl_explicit (BUILT_IN_SETJMP_SETUP),
@@ -315,43 +375,53 @@ insert_setjmp_before (gimple_stmt_iterator gsi)
   gsi_insert_after (&receiver_gsi, receiver_call, GSI_NEW_STMT);
 
   make_edge (dispatcher_bb, receiver_bb, EDGE_ABNORMAL);
-  make_edge (receiver_bb, dispatcher_bb, EDGE_ABNORMAL);
+  // TODO - CHECK_CODE: I don't know if we need this edge. If we do, thigs will get ugly. If we don't, correct the example on the function comment.
+  //make_edge (receiver_bb, dispatcher_bb, EDGE_ABNORMAL);
 }
 
 
-/* Instrument the reexecution point after STMT with a setjmp call.  */
+/* Insert rollback instrumentation right after the statements stored as
+   reexecution points.  */
 
-static bool
-instrument_reexec_point (const void *stmt_ptr, void *data ATTRIBUTE_UNUSED)
+static void
+instrument_reexec_points ()
 {
+  bool link_only;
   gimple stmt;
   gimple_stmt_iterator gsi;
-  basic_block bb;
+  basic_block bb, dispatcher_bb;
   edge e;
   edge_iterator ei;
+  struct pointer_set_t *instrumented_reexec_points;
 
-  stmt = (gimple) stmt_ptr;
-  bb = gimple_bb (stmt);
+  instrumented_reexec_points = pointer_set_create ();
 
-  // A reexecution point must be a real instruction.
-  if (gimple_code (stmt) == GIMPLE_PHI)
-    stmt = gsi_stmt (gsi_start_bb (bb));
+  while (reexec_points.length () > 0)
+    {
+      stmt = reexec_points.pop ();
+      bb = gimple_bb (stmt);
+      dispatcher_bb = reexec_point_dispatchers.pop ();
 
-  if (stmt != last_stmt (bb))
+      link_only = pointer_set_insert (instrumented_reexec_points, stmt);
+    
+      // A reexecution point must be a real instruction.
+      if (gimple_code (stmt) == GIMPLE_PHI)
+        stmt = gsi_stmt (gsi_start_bb (bb));
+    
+      if (stmt != last_stmt (bb))
     {
       gsi = gsi_for_stmt (stmt);
       gsi_next (&gsi);
-      insert_setjmp_before (gsi);
+      insert_setjmp_before (gsi, dispatcher_bb, link_only);
     }
-  else
+      else
     {
       FOR_EACH_EDGE (e, ei, bb->succs)
-    {
-      insert_setjmp_before (gsi_start_bb (e->dest));
+        insert_setjmp_before (gsi_start_bb (e->dest), dispatcher_bb, link_only);
     }
     }
 
-  return true;
+   pointer_set_destroy (instrumented_reexec_points);
 }
 
 
@@ -503,25 +573,6 @@ insert_loop_header_checkpoint (basic_block header)
 }
 
 
-/* Register a new reexecution point and update the set of loops containing at
-   least one reexecution point in their body.  */
-
-static void
-register_reexec_point (gimple stmt, bool update_loop_cuts)
-{
-  if (!pointer_set_insert (reexec_points, stmt) && update_loop_cuts)
-    {
-      struct loop *loop = (gimple_bb (stmt))->loop_father;
-      bitmap_set_bit (cut_loops, loop->num);
-
-      while ((loop = loop_outer (loop)) != NULL)
-    {
-      bitmap_set_bit (cut_loops, loop->num);
-    }
-    }
-}
-
-
 /* For every loop containing at least one reexecution point in its body, we
    insert reexecution points after uses of every variable defined by a phi
    function in the loop's header. We do that to avoid idempotent regions of
@@ -652,8 +703,6 @@ extract_reexec_points (gimple_stmt_iterator gsi_idemp_end)
     }
   while (stack.length ());
 
-  inspect_cut_loops ();
-
   BITMAP_FREE (visited);
   stack.release ();
 }
@@ -763,7 +812,7 @@ instrument_failure_site (gimple_stmt_iterator* failure_gsi)
   buf_addr = build1 (ADDR_EXPR, build_pointer_type (ptr_type_node), j_buffer);
   longjmp_proxy_call = gimple_build_call (longjmp_proxy_fn, 1, buf_addr);
   gsi_insert_before (&reexec_gsi, longjmp_proxy_call, GSI_SAME_STMT);
-  make_edge (reexec_bb, dispatcher_bb, EDGE_ABNORMAL);
+  make_edge (reexec_bb, current_dispatcher_bb, EDGE_ABNORMAL);
 }
 
 
@@ -876,6 +925,7 @@ simplify_failure_sites ()
 static unsigned int
 do_conair (void)
 {
+  bool sjlj_infra_initialized;
   basic_block bb;
   gimple_stmt_iterator gsi;
   gimple stmt;
@@ -889,7 +939,8 @@ do_conair (void)
 
   sjlj_infra_initialized = false;
   instrumented_asserts = pointer_set_create ();
-  reexec_points = pointer_set_create ();
+  reexec_points = vNULL;
+  reexec_point_dispatchers = vNULL;
   cut_loops = BITMAP_ALLOC (NULL);
   headers_with_checkpoints = BITMAP_ALLOC (NULL);
 
@@ -920,7 +971,12 @@ do_conair (void)
 
           if (is_assert_fail && !pointer_set_insert (instrumented_asserts, stmt))
         {
-          prepare_sjlj_infra ();
+          if (!sjlj_infra_initialized) {
+            prepare_sjlj_infra ();
+            sjlj_infra_initialized = true;
+          }
+
+          create_new_dispatcher (); 
           extract_reexec_points (gsi);
           instrument_failure_site (&gsi);
         }
@@ -928,17 +984,21 @@ do_conair (void)
     }
     }
 
-  pointer_set_traverse (reexec_points, instrument_reexec_point, NULL);
-
-  // In case the graph was instrumented, do some final fixup work.
+  // In case the graph was instrumented, dominance info is no longer valid and
+  // all effectful calls need an abnormal edge, as they may contain longjmps.
   if (sjlj_infra_initialized) {
     link_effectful_calls ();
     free_dominance_info (CDI_DOMINATORS);
   }
 
+  // TODO - CHECK_CODE
+  // inspect_cut_loops ();
+  instrument_reexec_points ();
+
   BITMAP_FREE (headers_with_checkpoints);
   BITMAP_FREE (cut_loops);
-  pointer_set_destroy (reexec_points);
+  reexec_points.release ();
+  reexec_point_dispatchers.release ();
   pointer_set_destroy (instrumented_asserts);
 
   return 0;

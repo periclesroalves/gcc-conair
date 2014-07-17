@@ -53,22 +53,38 @@ The technique behind ConAir is divided into three main steps, whose implementati
       - {Avoid code motion into idempotent regions}.
     - GCC built-in setjmp/longjmp.
       - {reuse of non-local goto machinery}.
-      - {the need for a dispatcher block and abnormal edges}.
+      - {the need for a dispatcher blocks and abnormal edges}.
       - {the need for a proxy function}.
       - {linking effectful calls: effectful functions may contain longjmps to
         the function that calls them, so every effectful call needs an abnormal
-        edge to the dispatcher block.}.
-      - [Deprecated - replace this by the new algortith for multiple dispatcher
-        blocks] Fixing the SSA net.
-        - {How instrumentation breaks the SSA form: uses not dominated by a
-          definition}.
-        - {Why in fact definitions will never be skipped}.
-        - {A problematic definition, that doesn't dominate at least one of its
-          uses, can be fixed by telling GCC to replace it by a new name, which
-          will be automatically fixed by GCC's SSA update pass}.
-        - {After the instrumentation we traverse the graph looking for
-          problematic definitions, telling GCC to fix them}.
-        
+        edge to a dispatcher block.}.
+      - {Why do we need different dispatcher blocks for different failure points
+        and its respective reexecution points}.
+        - {For sjljs inserted by hands, GCC links all of them to a single
+          dispatcher block, even if the reference different jump buffers}.
+        - {How a single dispatcher can break the SSA form if inserted during
+          compilation: a single dispatcher
+          may lead to uses not dominated by a definition [give example]. In fact
+          we know that definitions will never be skipped, because setjmps need
+          to be called a first time in order to be reachable, but that can't be
+          represented in SSA form with a single dispatcher}.
+        - {Solution: the obvious solution would be to insert phis for all
+          problematic definitions. Hoever, it was complicated to get GCC's ssa
+          fix pass to do that automatically. Seen that, we proposed an
+          instrumentation strategy that links different failure points to
+          different dispatcher blocks, thus solving the problem:}
+            - {For failure points not in loops}.
+            - {For failure points in loops (this may imply in changes to the
+              reexecution point identification process, described previously)}.
+            - {Algorithm description:
+                . Every longjmp is linked to a different dispathcer block.
+                . All setjmps related to a given longjmp are linked to the same
+                block.
+                . in case a setjmp is related to more than one longjmp, the
+                setjmp is linked to the dispatcher blocks of the two longjmps.
+                . All effectful calls are linked to a specific dispatcher block,
+                which is linked to the setjmp on the function entry.
+              }
 
 
 ## TODO List
