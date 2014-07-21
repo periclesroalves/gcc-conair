@@ -73,9 +73,16 @@ The technique behind ConAir is divided into three main steps, whose implementati
           fix pass to do that automatically. Seen that, we proposed an
           instrumentation strategy that links different failure points to
           different dispatcher blocks, thus solving the problem:}
-            - {For failure points not in loops}.
-            - {For failure points in loops (this may imply in changes to the
-              reexecution point identification process, described previously)}.
+            - {For failure points not in loops: identify reexecution points as
+              usual}.
+            - {For failure points in loops: simply insert a reexecution point
+              right before the failure site (idempotent region size equals
+              zero). This eliminates the need for a checkpoint (though we will
+              leave it in the code by now) and inserting
+              cuts after every read of dynamically reassigned variables in the
+              loop. We could extend the idempotent regions to the loop entry
+              with no problem, but then we would have to figure out to which
+              dispatcher the cuts after problematic reads should be linked to}.
             - {Algorithm description:
                 . Every longjmp is linked to a different dispathcer block.
                 . All setjmps related to a given longjmp are linked to the same

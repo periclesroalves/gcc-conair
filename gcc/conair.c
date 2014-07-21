@@ -256,6 +256,16 @@ register_reexec_point (gimple stmt, bool update_loop_cuts)
 }
 
 
+/* Return the loop to which an assertion failure belongs to.  */
+
+static inline struct loop*
+assert_loop_father (basic_block assert_bb)
+{
+  gcc_assert (single_pred_p (assert_bb));
+  return single_pred (assert_bb)->loop_father;
+}
+
+
 /* Create an abnormal edge from every effectful call to a dispatcher block,
    which will later be linked to the setjmp on the function entry. We assume
    that effectful calls that already are the last instruction in a block do not
@@ -775,13 +785,16 @@ insert_branch_expect_false (gimple_stmt_iterator* gsi, tree cmp_expr,
 */
 
 static void
-instrument_failure_site (gimple_stmt_iterator* failure_gsi)
+instrument_failure_site (gimple_stmt_iterator* failure_gsi, bool insert_sj_before)
 {
   tree cmp_expr, buf_addr;
   gimple counter_inc, nop, longjmp_proxy_call;
   gimple_stmt_iterator reexec_gsi, cond_gsi;
   basic_block failure_bb, cond_bb, reexec_bb;
   edge failure_e;
+  struct loop *loop_father;
+
+  loop_father = assert_loop_father (gsi_bb (*failure_gsi));
 
   // Insert reexecution counter increment.
   counter_inc = gimple_build_assign_with_ops (PLUS_EXPR, reexec_counter,
@@ -799,7 +812,9 @@ instrument_failure_site (gimple_stmt_iterator* failure_gsi)
   gsi_remove (&cond_gsi, true); // Remove placeholder.
   cond_gsi = gsi_last_bb (cond_bb);
   reexec_bb = create_empty_bb (cond_bb);
-  reexec_bb->loop_father = cond_bb->loop_father;
+  reexec_bb->loop_father = loop_father;
+  cond_bb->loop_father = loop_father;
+  failure_bb->loop_father = current_loops->tree_root;
 
   // Insert the reexecution counter test.
   cmp_expr = build2 (GT_EXPR, boolean_type_node, reexec_counter, build_int_cst
@@ -813,6 +828,10 @@ instrument_failure_site (gimple_stmt_iterator* failure_gsi)
   longjmp_proxy_call = gimple_build_call (longjmp_proxy_fn, 1, buf_addr);
   gsi_insert_before (&reexec_gsi, longjmp_proxy_call, GSI_SAME_STMT);
   make_edge (reexec_bb, current_dispatcher_bb, EDGE_ABNORMAL);
+
+  if (insert_sj_before)
+    insert_setjmp_before (gsi_for_stmt (longjmp_proxy_call),
+      current_dispatcher_bb, false);
 }
 
 
@@ -864,6 +883,7 @@ insert_deref_assert (gimple_stmt_iterator *gsi, tree addr_var)
 
   // Insert the assertion failure exit (implemented as a trap).
   assert_gsi = gsi_start_bb (assert_bb);
+  assert_bb->loop_father = current_loops->tree_root;
   fail_call = gimple_build_call (builtin_decl_explicit (BUILT_IN_TRAP), 0);
   gsi_insert_before (&assert_gsi, fail_call, GSI_SAME_STMT);
 
@@ -934,8 +954,8 @@ do_conair (void)
   // TODO: test if this function (simplification and instrumentation) works
   // when there is more than one assertion failure in the same block.
 
-  // This pass requires loop info to work.
-  gcc_assert (current_loops != NULL);
+  // Assure that loop info is up to date.
+  current_loops = flow_loops_find (current_loops);
 
   sjlj_infra_initialized = false;
   instrumented_asserts = pointer_set_create ();
@@ -959,7 +979,9 @@ do_conair (void)
       const char *posix_assert_fail = "__assert_fail";
       const char *bsd_assert_fail = "__assert_rtn";
       const char *self_assert_fail = "__builtin_trap";
+      bool insert_sj_before;
 
+      insert_sj_before = false;
       stmt = gsi_stmt (gsi);
 
       if (is_gimple_call (stmt)
@@ -976,9 +998,16 @@ do_conair (void)
             sjlj_infra_initialized = true;
           }
 
-          create_new_dispatcher (); 
-          extract_reexec_points (gsi);
-          instrument_failure_site (&gsi);
+          create_new_dispatcher ();
+
+          // If the failure site is inside a loop, we make the idempotent region
+          // size equals zero, so we don't break the SSA form.
+          if (assert_loop_father (gimple_bb (stmt)) == current_loops->tree_root)
+            extract_reexec_points (gsi);
+          else
+            insert_sj_before = true;
+
+          instrument_failure_site (&gsi, insert_sj_before);
         }
         }
     }
@@ -991,7 +1020,11 @@ do_conair (void)
     free_dominance_info (CDI_DOMINATORS);
   }
 
-  // TODO - CHECK_CODE
+  // TODO - CHECK_CODE: in the way we currently handle failure sites in loops
+  // (idempotent region size equals 0), we don't need this. If we decide to
+  // change it (i.e., extending the idempotent regions to the loop entry)
+  // reevaluate the need fo this (this implies in figuring out to which
+  // dispatcher block we need to link the new reexecution points).
   // inspect_cut_loops ();
   instrument_reexec_points ();
 
