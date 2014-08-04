@@ -69,7 +69,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "tree-pass.h"
 #include "cfgloop.h"
 
-#define MAX_REEXEC_COUNT 10000
+#define MAX_REEXEC_COUNT 999999999
 
 static vec<gimple> reexec_points;
 static vec<basic_block> reexec_point_dispatchers;
