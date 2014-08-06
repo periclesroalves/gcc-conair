@@ -294,7 +294,7 @@ link_effectful_calls ()
 
       if (should_end_bb) {
         edge e = split_block (bb, prev_stmt);
-        make_edge (e->src, current_dispatcher_bb, EDGE_ABNORMAL);
+        make_edge (e->src, current_dispatcher_bb, EDGE_ABNORMAL_CALL);
       }
 
       should_end_bb = is_gimple_call (stmt) && gimple_has_side_effects (stmt);
@@ -827,7 +827,7 @@ instrument_failure_site (gimple_stmt_iterator* failure_gsi, bool insert_sj_befor
   buf_addr = build1 (ADDR_EXPR, build_pointer_type (ptr_type_node), j_buffer);
   longjmp_proxy_call = gimple_build_call (longjmp_proxy_fn, 1, buf_addr);
   gsi_insert_before (&reexec_gsi, longjmp_proxy_call, GSI_SAME_STMT);
-  make_edge (reexec_bb, current_dispatcher_bb, EDGE_ABNORMAL);
+  make_edge (reexec_bb, current_dispatcher_bb, EDGE_ABNORMAL_CALL);
 
   if (insert_sj_before)
     insert_setjmp_before (gsi_for_stmt (longjmp_proxy_call),
