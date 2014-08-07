@@ -267,9 +267,8 @@ assert_loop_father (basic_block assert_bb)
 
 
 /* Create an abnormal edge from every effectful call to a dispatcher block,
-   which will later be linked to the setjmp on the function entry. We assume
-   that effectful calls that already are the last instruction in a block do not
-   need any modification. Note that blocks are split if needed.  */
+   which will later be linked to the setjmp on the function entry. Blocks are
+   split if needed Note that blocks are split if needed.  */
 
 static void
 link_effectful_calls ()
@@ -285,23 +284,27 @@ link_effectful_calls ()
 
   FOR_EACH_BB_FN (bb, cfun)
     {
-      bool should_end_bb = false;
+      bool effectful_call = false;
       gimple prev_stmt;
 
       for (gsi = gsi_start_bb (bb); !gsi_end_p (gsi); gsi_next (&gsi))
     {
       stmt = gsi_stmt (gsi);
 
-      if (should_end_bb) {
+      if (effectful_call) {
         edge e = split_block (bb, prev_stmt);
-        make_edge (e->src, current_dispatcher_bb, EDGE_ABNORMAL_CALL);
+        make_edge (e->src, current_dispatcher_bb, EDGE_ABNORMAL);
       }
 
-      should_end_bb = is_gimple_call (stmt) && gimple_has_side_effects (stmt);
+      effectful_call = is_gimple_call (stmt) && gimple_has_side_effects (stmt);
 
-      if (should_end_bb)
+      if (effectful_call)
         prev_stmt = stmt;
     }
+
+      // If an effectful call is the last instruction, just create the ABN edge.
+      if (effectful_call)
+        make_edge (bb, current_dispatcher_bb, EDGE_ABNORMAL);
     }
 }
 
