@@ -405,8 +405,10 @@ instrument_reexec_points ()
   basic_block bb, dispatcher_bb;
   edge e;
   edge_iterator ei;
+  bitmap instrumented_succs;
   struct pointer_set_t *instrumented_reexec_points;
 
+  instrumented_succs = BITMAP_ALLOC (NULL);
   instrumented_reexec_points = pointer_set_create ();
 
   while (reexec_points.length () > 0)
@@ -430,11 +432,16 @@ instrument_reexec_points ()
       else
     {
       FOR_EACH_EDGE (e, ei, bb->succs)
+        {
+      // A successor may be already instrumented due to another failure point.
+      if (bitmap_set_bit (instrumented_succs, e->dest->index))
         insert_setjmp_before (gsi_start_bb (e->dest), dispatcher_bb, link_only);
+        }
     }
     }
 
    pointer_set_destroy (instrumented_reexec_points);
+   BITMAP_FREE (instrumented_succs);
 }
 
 
