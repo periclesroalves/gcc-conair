@@ -433,8 +433,9 @@ instrument_reexec_points ()
     {
       FOR_EACH_EDGE (e, ei, bb->succs)
         {
-      // A successor may be already instrumented due to another failure point.
-      if (bitmap_set_bit (instrumented_succs, e->dest->index))
+      // Do not follow ABN edges or instrument repeated blocks.
+      if (bitmap_set_bit (instrumented_succs, e->dest->index) &&
+        !(e->flags & EDGE_ABNORMAL))
         insert_setjmp_before (gsi_start_bb (e->dest), dispatcher_bb, link_only);
         }
     }
