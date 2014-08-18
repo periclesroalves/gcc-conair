@@ -268,7 +268,7 @@ assert_loop_father (basic_block assert_bb)
 
 /* Create an abnormal edge from every effectful call to a dispatcher block,
    which will later be linked to the setjmp on the function entry. Blocks are
-   split if needed Note that blocks are split if needed.  */
+   split if needed.  */
 
 static void
 link_effectful_calls ()
@@ -302,8 +302,9 @@ link_effectful_calls ()
         prev_stmt = stmt;
     }
 
-      // If an effectful call is the last instruction, just create the ABN edge.
-      if (effectful_call)
+      // If an effectful call is the last instruction, create the ABN edge if it
+      // doesn't exist.
+      if (effectful_call && !has_abnormal_or_eh_outgoing_edge_p (bb))
         make_edge (bb, current_dispatcher_bb, EDGE_ABNORMAL);
     }
 }
