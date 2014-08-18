@@ -304,7 +304,13 @@ link_effectful_calls ()
 
       // If an effectful call is the last instruction, create the ABN edge if it
       // doesn't exist.
-      if (effectful_call && !has_abnormal_or_eh_outgoing_edge_p (bb))
+      has_abn_edge = false;
+
+      FOR_EACH_EDGE (e, ei, bb->succs)
+        if (e->flags & (EDGE_ABNORMAL | EDGE_ABNORMAL_CALL | EDGE_EH))
+          has_abn_edge = true;
+
+      if (effectful_call && !has_abn_edge)
         make_edge (bb, current_dispatcher_bb, EDGE_ABNORMAL);
     }
 }
