@@ -273,9 +273,12 @@ assert_loop_father (basic_block assert_bb)
 static void
 link_effectful_calls ()
 {
+  bool has_abn_edge;
   gimple stmt;
   gimple_stmt_iterator gsi;
   basic_block bb;
+  edge e;
+  edge_iterator ei;
 
   // TODO: test this function (maybe we don't need to link the functions, but just to split the block).
 
@@ -296,7 +299,15 @@ link_effectful_calls ()
         make_edge (e->src, current_dispatcher_bb, EDGE_ABNORMAL);
       }
 
-      effectful_call = is_gimple_call (stmt) && gimple_has_side_effects (stmt);
+      if (is_gimple_call (stmt))
+        {
+          bool dispatcher_call = false;
+
+          // Dispatcher calls will be linked later.
+          dispatcher_call = gimple_call_internal_p (stmt) &&
+            (gimple_call_internal_fn (stmt) == IFN_ABNORMAL_DISPATCHER);
+          effectful_call = gimple_has_side_effects (stmt) && !dispatcher_call;
+        }
 
       if (effectful_call)
         prev_stmt = stmt;
