@@ -297,6 +297,7 @@ link_effectful_calls ()
       if (effectful_call) {
         edge e = split_block (bb, prev_stmt);
         make_edge (e->src, current_dispatcher_bb, EDGE_ABNORMAL);
+        effectful_call = false;
       }
 
       if (is_gimple_call (stmt))
