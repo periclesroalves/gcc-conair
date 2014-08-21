@@ -1,4 +1,4 @@
-
+---------
 - General
 ---------
 
@@ -156,12 +156,18 @@ setjmp restores the registers, the stack is also restored).
 - While fixing the SSA net, we currently verify each definition in the graph to
   see if it is problematic. Change this to a more constrained search (only
   blocks that can be reached from an assertion block and can reach a setjmp).
+- When an idempotent killing instruction is the last one in a block, we
+  insert a setjmp in the beginning of every successor. This may be inserting
+  useless setjmps, because not all successors may need a setjmp (just the ones
+  that reache a failure point).
 
 
-------
-- Wiki
-------
+---------------------------
+Benchmark testing work list
+---------------------------
 
-- Adnormal edges and dispatcher block (also how this avoids code motion around
-  sjljs).
-- The need for abnormal edges from every effectful call to the dispatcher.
+- ZSnes:
+  . Loop header checkpoint insertion was disabled because the reassignment was causing an error.
+  . Call graph edge frequency error ignored.
+  . Incorrect EH edges error ignored.
+  . Tail merge optimization was disabled due to an internal assertion failure. 
